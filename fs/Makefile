@@ -137,3 +137,7 @@ obj-$(CONFIG_EFIVAR_FS)		+= efivarfs/
 obj-$(CONFIG_EROFS_FS)		+= erofs/
 obj-$(CONFIG_VBOXSF_FS)		+= vboxsf/
 obj-$(CONFIG_ZONEFS_FS)		+= zonefs/
+
+#ifdef OPLUS_FEATURE_PERFORMANCE_FS
+obj-$(CONFIG_OPLUS_FEATURE_PERFORMANCE_FS) += oplus_perf_fs/
+#endif /* OPLUS_FEATURE_PERFORMANCE_FS */

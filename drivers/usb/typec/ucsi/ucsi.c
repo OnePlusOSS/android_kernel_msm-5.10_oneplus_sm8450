@@ -537,7 +537,7 @@ static void ucsi_get_src_pdos(struct ucsi_connector *con, int is_partner)
 		return;
 
 	con->num_pdos += ret / sizeof(u32);
-}
+ }
 
 static void ucsi_pwr_opmode_change(struct ucsi_connector *con)
 {

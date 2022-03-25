@@ -833,6 +833,10 @@ config UCLAMP_BUCKETS_COUNT
 
 	  If in doubt, use the default value.
 
+#ifdef OPLUS_FEATURE_PERFORMANCE_SCHED
+source "kernel/oplus_perf_sched/Kconfig"
+source "kernel/sched/walt/tuning/Kconfig"
+#endif /* OPLUS_FEATURE_PERFORMANCE_SCHED */
 endmenu
 
 #

@@ -38,7 +38,11 @@ void walt_init_topapp_tg(struct task_group *tg)
 
 	wtg = (struct walt_task_group *) tg->android_vendor_data1;
 
+#ifdef CONFIG_OPLUS_FEATURE_INPUT_BOOST
+	wtg->colocate = false;
+#else
 	wtg->colocate = true;
+#endif
 	wtg->sched_boost_enable[NO_BOOST] = false;
 	wtg->sched_boost_enable[FULL_THROTTLE_BOOST] = true;
 	wtg->sched_boost_enable[CONSERVATIVE_BOOST] = true;

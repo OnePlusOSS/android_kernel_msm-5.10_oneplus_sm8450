@@ -521,7 +521,25 @@ struct cnss_plat_data {
 	const char *vreg_ol_cpr, *vreg_ipa;
 	bool adsp_pc_enabled;
 	u64 feature_list;
+#ifdef OPLUS_FEATURE_WIFI_DCS_SWITCH
+//#Huitao@CONNECTIVITY.WIFI.HARDWARE.SWITCH.2877804 , add for wifi fw monitor
+	unsigned long loadBdfState;
+	unsigned long loadRegdbState;
+#endif /* OPLUS_FEATURE_WIFI_DCS_SWITCH */
 };
+
+#ifdef OPLUS_FEATURE_WIFI_DCS_SWITCH
+//#Huitao@CONNECTIVITY.WIFI.HARDWARE.SWITCH.2877804 , add for wifi fw monitor
+enum cnss_load_state {
+	CNSS_LOAD_BDF_FAIL = 1,
+	CNSS_LOAD_BDF_SUCCESS,
+	CNSS_LOAD_REGDB_FAIL,
+	CNSS_LOAD_REGDB_SUCCESS,
+	CNSS_PROBE_FAIL,
+	CNSS_PROBE_SUCCESS,
+};
+
+#endif /* OPLUS_FEATURE_WIFI_DCS_SWITCH */
 
 #if IS_ENABLED(CONFIG_ARCH_QCOM)
 static inline u64 cnss_get_host_timestamp(struct cnss_plat_data *plat_priv)

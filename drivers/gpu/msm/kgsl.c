@@ -37,6 +37,8 @@
 #include "kgsl_sysfs.h"
 #include "kgsl_trace.h"
 
+#include "../../../../../vendor/oplus/kernel/oplus_performance_5.10/mm/gloom/reserve_area.h"
+
 #ifndef arch_mmap_check
 #define arch_mmap_check(addr, len, flags)	(0)
 #endif
@@ -579,6 +581,54 @@ static void kgsl_context_debug_info(struct kgsl_device *device)
 {
 }
 #endif
+
+int read_each_kgsl_process_private(int (*callback)(const struct kgsl_process_private *kp,
+				   void *private), void *private)
+{
+	struct kgsl_process_private *p;
+	int ret;
+
+	read_lock(&kgsl_driver.proclist_lock);
+
+	list_for_each_entry(p, &kgsl_driver.process_list, list) {
+		ret = callback(p, private);
+		if (ret)
+			break;
+	}
+
+	read_unlock(&kgsl_driver.proclist_lock);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(read_each_kgsl_process_private);
+
+ssize_t read_kgsl_memstat(const char *name)
+{
+	uint64_t val = 0;
+
+	if (likely(!strcmp(name, "page_alloc")))
+		val = atomic_long_read(&kgsl_driver.stats.page_alloc);
+	else if (!strcmp(name, "vmalloc"))
+		val = atomic_long_read(&kgsl_driver.stats.vmalloc);
+	else if (!strcmp(name, "vmalloc_max"))
+		val = atomic_long_read(&kgsl_driver.stats.vmalloc_max);
+	else if (!strcmp(name, "page_alloc_max"))
+		val = atomic_long_read(&kgsl_driver.stats.page_alloc_max);
+	else if (!strcmp(name, "coherent"))
+		val = atomic_long_read(&kgsl_driver.stats.coherent);
+	else if (!strcmp(name, "coherent_max"))
+		val = atomic_long_read(&kgsl_driver.stats.coherent_max);
+	else if (!strcmp(name, "secure"))
+		val = atomic_long_read(&kgsl_driver.stats.secure);
+	else if (!strcmp(name, "secure_max"))
+		val = atomic_long_read(&kgsl_driver.stats.secure_max);
+	else if (!strcmp(name, "mapped"))
+		val = atomic_long_read(&kgsl_driver.stats.mapped);
+	else if (!strcmp(name, "mapped_max"))
+		val = atomic_long_read(&kgsl_driver.stats.mapped_max);
+
+	return val;
+}
+EXPORT_SYMBOL_GPL(read_kgsl_memstat);
 
 /**
  * kgsl_context_dump() - dump information about a draw context
@@ -4299,6 +4349,10 @@ kgsl_get_unmapped_area(struct file *file, unsigned long addr,
 					       pid_nr(private->pid), addr, pgoff, len,
 					       (int) val);
 	}
+
+#if defined(OPLUS_FEATURE_VIRTUAL_RESERVE_MEMORY) && defined(CONFIG_VIRTUAL_RESERVE_MEMORY)
+	update_oom_pid_and_time(len, val, flags);
+#endif
 
 	kgsl_mem_entry_put(entry);
 	return val;

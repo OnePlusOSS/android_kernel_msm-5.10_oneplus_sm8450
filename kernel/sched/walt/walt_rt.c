@@ -8,6 +8,13 @@
 #include "walt.h"
 #include "trace.h"
 
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_SCHED_ASSIST)
+#include <../kernel/oplus_perf_sched/sched_assist/sa_common.h>
+#endif
+
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_INPUT_BOOST)
+extern bool slide_rt_boost(struct task_struct *p);
+#endif
 static DEFINE_PER_CPU(cpumask_var_t, walt_local_cpu_mask);
 
 static void walt_rt_energy_aware_wake_cpu(void *unused, struct task_struct *task,
@@ -24,6 +31,9 @@ static void walt_rt_energy_aware_wake_cpu(void *unused, struct task_struct *task
 	int cluster;
 	int order_index = (boost_on_big && num_sched_clusters > 1) ? 1 : 0;
 	bool best_cpu_lt = true;
+#if defined(CONFIG_OPLUS_FEATURE_SF_BOOST) || defined(CONFIG_OPLUS_FEATURE_HWC_BOOST)
+	struct oplus_task_struct *ots = get_oplus_task_struct(task);
+#endif
 
 	if (unlikely(walt_disabled))
 		return;
@@ -31,6 +41,27 @@ static void walt_rt_energy_aware_wake_cpu(void *unused, struct task_struct *task
 	if (!ret)
 		return; /* No targets found */
 
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_SCHED_ASSIST)
+	adjust_rt_lowest_mask(task, lowest_mask, ret, false);
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_INPUT_BOOST)
+	if (!boost_on_big && slide_rt_boost(task))
+		order_index = (num_sched_clusters > 1) ? 1 : 0;
+#endif
+#endif
+#ifdef CONFIG_OPLUS_FEATURE_SF_BOOST
+	/* For surfaceflinger with util > 90, prefer to use big core */
+	if (ots->im_flag == IM_FLAG_SURFACEFLINGER && tutil > 90) {
+		boost_on_big = true;
+		order_index = (boost_on_big && num_sched_clusters > 1) ? 1 : 0;
+	}
+#endif
+#ifdef CONFIG_OPLUS_FEATURE_HWC_BOOST
+	/* For hwc with util > 51, prefer to use big core */
+	if (ots->im_flag == IM_FLAG_HWC && tutil > 51) {
+		boost_on_big = true;
+		order_index = (boost_on_big && num_sched_clusters > 1) ? 1 : 0;
+	}
+#endif
 	rcu_read_lock();
 	for (cluster = 0; cluster < num_sched_clusters; cluster++) {
 		for_each_cpu_and(cpu, lowest_mask, &cpu_array[order_index][cluster]) {
@@ -44,7 +75,11 @@ static void walt_rt_energy_aware_wake_cpu(void *unused, struct task_struct *task
 			if (sched_cpu_high_irqload(cpu))
 				continue;
 
+#ifdef CONFIG_OPLUS_FEATURE_HWC_BOOST
+			if (__cpu_overutilized(cpu, tutil) && ots->im_flag != IM_FLAG_HWC)
+#else
 			if (__cpu_overutilized(cpu, tutil))
+#endif
 				continue;
 
 			util = cpu_util(cpu);

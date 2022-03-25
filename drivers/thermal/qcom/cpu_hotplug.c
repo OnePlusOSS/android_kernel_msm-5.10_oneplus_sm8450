@@ -138,7 +138,7 @@ static struct thermal_cooling_device_ops cpu_hot_cooling_ops = {
 static void cpu_hot_execute_cdev(struct work_struct *work)
 {
 	struct cpu_hot_cdev *cpu_hot_cdev =
-			container_of(work, struct cpu_hot_cdev, exec_work);
+	container_of(work, struct cpu_hot_cdev, exec_work);
 	int ret = 0, cpu = 0;
 
 	mutex_lock(&cpu_hot_lock);

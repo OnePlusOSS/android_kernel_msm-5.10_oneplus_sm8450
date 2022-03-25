@@ -11,4 +11,13 @@ static inline unsigned long get_seconds(void)
 	return ktime_get_real_seconds();
 }
 
+//add for dx1 bringup
+static inline void getnstimeofday(struct timespec *ts)
+{
+	struct timespec64 ts64;
+
+	ktime_get_real_ts64(&ts64);
+	*ts = timespec64_to_timespec(ts64);
+}
+
 #endif

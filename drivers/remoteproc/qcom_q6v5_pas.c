@@ -41,6 +41,7 @@ static struct icc_path *scm_perf_client;
 static int scm_pas_bw_count;
 static DEFINE_MUTEX(scm_pas_bw_mutex);
 bool timeout_disabled;
+extern char stackup_pcb_absent_status[];
 
 struct adsp_data {
 	int crash_reason_smem;
@@ -103,6 +104,48 @@ struct qcom_adsp {
 	struct qcom_rproc_ssr ssr_subdev;
 	struct qcom_sysmon *sysmon;
 };
+
+#ifdef OPLUS_FEATURE_MODEM_MINIDUMP
+//MaiWentian@NETWORK.RF,1213568, 2018/01/05,Modify for skip mini dump encryption
+#define MAX_NUM_OF_SS           10
+#define MAX_REGION_NAME_LENGTH  16
+#define SBL_MINIDUMP_SMEM_ID	602
+#define MD_REGION_VALID		('V' << 24 | 'A' << 16 | 'L' << 8 | 'I' << 0)
+#define MD_SS_ENCR_DONE		('D' << 24 | 'O' << 16 | 'N' << 8 | 'E' << 0)
+#define MD_SS_ENABLED		('E' << 24 | 'N' << 16 | 'B' << 8 | 'L' << 0)
+
+/**
+ * struct minidump_subsystem_toc: Subsystem's SMEM Table of content
+ * @status : Subsystem toc init status
+ * @enabled : if set to 1, this region would be copied during coredump
+ * @encryption_status: Encryption status for this subsystem
+ * @encryption_required : Decides to encrypt the subsystem regions or not
+ * @region_count : Number of regions added in this subsystem toc
+ * @regions_baseptr : regions base pointer of the subsystem
+ */
+struct minidump_subsystem {
+	__le32	status;
+	__le32	enabled;
+	__le32	encryption_status;
+	__le32	encryption_required;
+	__le32	region_count;
+	__le64	regions_baseptr;
+};
+
+/**
+ * struct minidump_global_toc: Global Table of Content
+ * @status : Global Minidump init status
+ * @md_revision : Minidump revision
+ * @enabled : Minidump enable status
+ * @subsystems : Array of subsystems toc
+ */
+struct minidump_global_toc {
+	__le32				status;
+	__le32				md_revision;
+	__le32				enabled;
+	struct minidump_subsystem	subsystems[MAX_NUM_OF_SS];
+};
+#endif
 
 static ssize_t txn_id_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
@@ -441,11 +484,39 @@ static int adsp_stop(struct rproc *rproc)
 	int handover;
 	int ret;
 
+	#ifdef OPLUS_FEATURE_MODEM_MINIDUMP
+	//MaiWentian@NETWORK.RF,1213568, 2018/01/05,Modify for skip mini dump encryption
+	unsigned int minidump_id = 0;
+	struct minidump_subsystem *subsystem = NULL;
+	struct minidump_global_toc *toc = NULL;
+
+	minidump_id = adsp->minidump_id;
+	if (minidump_id == 3) {
+		/* Get Global minidump ToC*/
+		toc = qcom_smem_get(QCOM_SMEM_HOST_ANY, SBL_MINIDUMP_SMEM_ID, NULL);
+		/* check if global table pointer exists and init is set */
+		if (IS_ERR(toc) || !toc->status) {
+			dev_err(&rproc->dev, "Minidump TOC not found in SMEM\n");
+			ret = -EINVAL;
+			return ret;
+		}
+		subsystem = &toc->subsystems[minidump_id];
+	}
+	#endif
+
 	trace_rproc_qcom_event(dev_name(adsp->dev), "adsp_stop", "enter");
 
 	ret = qcom_q6v5_request_stop(&adsp->q6v5, adsp->sysmon);
 	if (ret == -ETIMEDOUT)
 		dev_err(adsp->dev, "timed out on wait\n");
+
+	#ifdef OPLUS_FEATURE_MODEM_MINIDUMP
+	//MaiWentian@NETWORK.RF,1213568, 2018/01/05,Modify for skip mini dump encryption
+	if (minidump_id == 3) { //only check for modem . currently 3 is modem
+		subsystem->enabled = 0;
+		subsystem->encryption_status = 0;
+	}
+	#endif
 
 	scm_pas_enable_bw();
 	if (adsp->retry_shutdown)
@@ -456,6 +527,15 @@ static int adsp_stop(struct rproc *rproc)
 		panic("Panicking, remoteproc %s failed to shutdown.\n", rproc->name);
 
 	scm_pas_disable_bw();
+
+	#ifdef OPLUS_FEATURE_MODEM_MINIDUMP
+	//MaiWentian@NETWORK.RF,1213568, 2018/01/05,Modify for skip mini dump encryption
+	if (minidump_id == 3) { //only check for modem . currently 3 is modem
+		subsystem->enabled = MD_SS_ENABLED;
+		subsystem->encryption_status = MD_SS_ENCR_DONE;
+	}
+	#endif
+
 	adsp_pds_disable(adsp, adsp->active_pds, adsp->active_pd_count);
 	adsp_toggle_load_state(adsp->qmp, adsp->qmp_name, false);
 	handover = qcom_q6v5_unprepare(&adsp->q6v5);
@@ -711,13 +791,18 @@ static int adsp_probe(struct platform_device *pdev)
 		ops = &adsp_minidump_ops;
 
 	rproc = rproc_alloc(&pdev->dev, pdev->name, ops, fw_name, sizeof(*adsp));
-
 	if (!rproc) {
 		dev_err(&pdev->dev, "unable to allocate remoteproc\n");
 		return -ENOMEM;
 	}
 
-	rproc->recovery_disabled = true;
+	if (strcmp(stackup_pcb_absent_status, "1") == 0) {
+		dev_err(&pdev->dev, "stackup_pcb_absent_status = 1, enable SSR\n");
+		rproc->recovery_disabled = false;
+	}
+	else {
+		rproc->recovery_disabled = true;
+	}
 	rproc->auto_boot = desc->auto_boot;
 	if (desc->uses_elf64)
 		rproc_coredump_set_elf_info(rproc, ELFCLASS64, EM_NONE);

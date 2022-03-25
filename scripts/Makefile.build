@@ -29,6 +29,9 @@ asflags-y  :=
 ccflags-y  :=
 cppflags-y :=
 ldflags-y  :=
+#ifdef OPLUS_FEATURE_CHG_BASIC
+KBUILD_LDS_MODULE_ATTACH :=
+#endif
 
 subdir-asflags-y :=
 subdir-ccflags-y :=
@@ -283,8 +286,15 @@ cmd_mod = { \
 	$(undefined_syms) echo; \
 	} > $@
 
+#ifdef OPLUS_FEATURE_CHG_BASIC
+	cmd_mod_lds = $(if $(KBUILD_LDS_MODULE_ATTACH), cat $(firstword $(KBUILD_LDS_MODULE_ATTACH)) > $(@:.mod=.lds))
+#endif
+
 $(obj)/%.mod: $(obj)/%.o FORCE
 	$(call if_changed,mod)
+#ifdef OPLUS_FEATURE_CHG_BASIC
+	$(call cmd,mod_lds)
+#endif
 
 quiet_cmd_cc_lst_c = MKLST   $@
       cmd_cc_lst_c = $(CC) $(c_flags) -g -c -o $*.o $< && \

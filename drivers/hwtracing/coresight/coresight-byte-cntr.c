@@ -59,8 +59,17 @@ static long tmc_etr_flush_remaining_bytes(struct tmc_drvdata *tmcdrvdata, loff_t
 {
 	long rwp_offset, req_size, actual = 0;
 	struct etr_buf *etr_buf = tmcdrvdata->sysfs_buf;
+	struct device *dev = &tmcdrvdata->csdev->dev;
+	int rc = 0;
+
+	rc = pm_runtime_get_sync(dev->parent);
+	if (rc < 0) {
+		pm_runtime_put_noidle(dev->parent);
+		return rc;
+	}
 
 	rwp_offset = tmc_get_rwp_offset(tmcdrvdata);
+	pm_runtime_put(dev->parent);
 	req_size = ((rwp_offset < *ppos) ? tmcdrvdata->size : 0) +
 		rwp_offset - *ppos;
 

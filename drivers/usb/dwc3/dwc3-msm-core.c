@@ -556,6 +556,36 @@ struct dwc3_msm {
 #define USB_SSPHY_1P8_HPM_LOAD		23000	/* uA */
 
 static void dwc3_pwr_event_handler(struct dwc3_msm *mdwc);
+#ifdef OPLUS_FEATURE_CHG_BASIC
+
+static bool (*oplus_ignore_usb_notify)(void);
+static int dwc3_msm_usb_set_role(struct usb_role_switch *sw, enum usb_role role);
+void oplus_dwc3_config_usbphy_pfunc(bool (*pfunc)(void))
+{
+	oplus_ignore_usb_notify = pfunc;
+}
+EXPORT_SYMBOL(oplus_dwc3_config_usbphy_pfunc);
+
+void oplus_usb_set_none_role(void)
+{
+	printk(KERN_ERR "%s\n", __func__);
+}
+EXPORT_SYMBOL(oplus_usb_set_none_role);
+
+static bool oplus_dwc3_need_set_usbphy_hz(void)
+{
+	bool ret = false;
+
+	if (oplus_ignore_usb_notify == NULL) {
+		ret = false;
+	} else {
+		ret = oplus_ignore_usb_notify();
+	}
+
+	printk(KERN_ERR "%s, set usbphy hz:%d\n", __func__, ret);
+	return ret;
+}
+#endif
 
 static inline void dwc3_msm_ep_writel(void __iomem *base, u32 offset, u32 value)
 {
@@ -3312,12 +3342,21 @@ static void enable_usb_pdc_interrupt(struct dwc3_msm *mdwc, bool enable)
 			&mdwc->wakeup_irq[DP_HS_PHY_IRQ],
 			IRQ_TYPE_EDGE_FALLING, enable);
 	} else {
+		#ifdef OPLUS_FEATURE_CHG_BASIC
+		configure_usb_wakeup_interrupt(mdwc,
+			&mdwc->wakeup_irq[DP_HS_PHY_IRQ],
+			 IRQF_TRIGGER_HIGH | IRQ_TYPE_LEVEL_HIGH, true);
+		configure_usb_wakeup_interrupt(mdwc,
+			&mdwc->wakeup_irq[DM_HS_PHY_IRQ],
+			IRQF_TRIGGER_HIGH | IRQ_TYPE_LEVEL_HIGH, true);
+		#else
 		configure_usb_wakeup_interrupt(mdwc,
 			&mdwc->wakeup_irq[DP_HS_PHY_IRQ],
 			IRQ_TYPE_EDGE_RISING, true);
 		configure_usb_wakeup_interrupt(mdwc,
 			&mdwc->wakeup_irq[DM_HS_PHY_IRQ],
 			IRQ_TYPE_EDGE_RISING, true);
+		#endif
 	}
 
 	configure_usb_wakeup_interrupt(mdwc,
@@ -4312,6 +4351,14 @@ static int dwc3_msm_usb_set_role(struct usb_role_switch *sw, enum usb_role role)
 
 	mutex_lock(&mdwc->role_switch_mutex);
 	cur_role = dwc3_msm_usb_get_role(sw);
+
+#ifdef OPLUS_FEATURE_CHG_BASIC
+	if (oplus_dwc3_need_set_usbphy_hz() == true && role != USB_ROLE_NONE) {
+		pr_err("!!!ignore the notify to start USB device mode");
+		mutex_unlock(&mdwc->role_switch_mutex);
+		return 0;
+	}
+#endif
 
 	switch (role) {
 	case USB_ROLE_HOST:
@@ -5959,6 +6006,10 @@ static int dwc3_msm_pm_resume(struct device *dev)
 
 	atomic_set(&mdwc->pm_suspended, 0);
 
+	/* Let DWC3 core complete determine if resume is needed */
+	if (!mdwc->in_host_mode)
+		return 0;
+
 	/* Resume dwc to avoid unclocked access by xhci_plat_resume */
 	dwc3_msm_resume(mdwc);
 	pm_runtime_disable(dev);
@@ -6014,7 +6065,9 @@ static int dwc3_host_prepare(struct device *dev)
 static int dwc3_core_prepare(struct device *dev)
 {
 	struct dwc3 *dwc = dev_get_drvdata(dev);
+	struct dwc3_msm *mdwc = dev_get_drvdata(dwc->dev->parent);
 
+	dbg_event(0xFF, "Core PM prepare", pm_runtime_suspended(dev));
 	/*
 	 * It is recommended to use the PM prepare callback to handle situations
 	 * where the device is already runtime suspended, in order to avoid
@@ -6038,21 +6091,17 @@ static int dwc3_core_prepare(struct device *dev)
 
 static void dwc3_core_complete(struct device *dev)
 {
-	int		ret;
+	struct dwc3	*dwc = dev_get_drvdata(dev);
+	struct dwc3_msm *mdwc = dev_get_drvdata(dwc->dev->parent);
 
 	/*
 	 * In the PM devices documentation, while leaving system suspend when
 	 * the device is in the RPM suspended state, it is recommended to use
 	 * the direct_complete flag to determine if an explicit runtime resume
-	 * needs to be executed.
+	 * needs to be executed. However, in DWC3 MSM case, we can allow changes
+	 * to cable status, or XHCI status to wake up the DWC3 core.
 	 */
-	if (dev->power.direct_complete) {
-		ret = pm_request_resume(dev);
-		if (ret < 0) {
-			dev_err(dev, "failed to runtime resume, ret %d\n", ret);
-			return;
-		}
-	}
+	dbg_event(0xFF, "Core PM complete", dev->power.direct_complete);
 }
 #endif
 

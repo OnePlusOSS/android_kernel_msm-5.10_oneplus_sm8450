@@ -473,3 +473,14 @@ config HAVE_CBPF_JIT
 # Extended BPF JIT (eBPF)
 config HAVE_EBPF_JIT
 	bool
+
+source "net/oplus_score/Kconfig"
+
+#XuFenghua@CONNECTIVITY.WIFI.BASIC.CAPCENTER.190453, OPLUS_FEATURE_WIFI_CAPCENTER, 2021/5/31
+source "net/oplus_wificapcenter/Kconfig"
+
+source "net/oplus_connectivity_sla/Kconfig"
+
+source "net/oplus_apps_monitor/Kconfig"
+
+source "net/oplus_modules/Kconfig"

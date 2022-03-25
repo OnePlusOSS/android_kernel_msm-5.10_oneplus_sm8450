@@ -35,7 +35,7 @@ append_cmd PRE_DEFCONFIG_CMDS 'compile_external_dtc'
 
 ################################################################################
 ## DTB general support
-DTB_DIR=vendor/qcom
+DTB_DIR=vendor/oplus
 
 MAKE_GOALS+=" dtbs"
 
@@ -171,7 +171,8 @@ function prepare_vendor_dlkm() {
     else
       module_list_flag="-e ''"
     fi
-    (cd "${MODULES_STAGING_DIR}/lib/modules/" && find -type f -name "*.ko" -printf "%f\n") | \
+
+(cd "${MODULES_STAGING_DIR}/lib/modules/" && find -type f -name "*.ko" -printf "%f\n") | \
       grep -w -v ${module_list_flag} - > ${MODULES_STAGING_DIR}/vendor_dlkm.modules.load
 
     VENDOR_DLKM_MODULES_LIST="${MODULES_STAGING_DIR}/vendor_dlkm.modules.load"

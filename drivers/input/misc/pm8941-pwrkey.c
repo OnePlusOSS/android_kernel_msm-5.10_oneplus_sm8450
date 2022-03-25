@@ -177,6 +177,9 @@ static irqreturn_t pm8941_pwrkey_irq(int irq, void *_data)
 	}
 	pwrkey->last_status = sts;
 
+	if (pwrkey->code == KEY_POWER)
+		pr_err("keycode = %d, key_st = %d\n", pwrkey->code, sts);
+
 	input_report_key(pwrkey->input, pwrkey->code, sts);
 	input_sync(pwrkey->input);
 

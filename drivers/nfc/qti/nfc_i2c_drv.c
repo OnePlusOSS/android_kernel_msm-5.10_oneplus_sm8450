@@ -37,6 +37,12 @@
  */
 
 #include "nfc_common.h"
+#include "../oplus_nfc/oplus_nfc.h"
+
+#ifdef OPLUS_BUG_STABILITY
+#define NCI_GET_FW_CMD_LEN       8
+#define NCI_GET_FW_RSP_LEN       14
+#endif
 
 /**
  * i2c_disable_irq()
@@ -186,6 +192,19 @@ err:
 	return ret;
 }
 
+#ifdef OPLUS_BUG_STABILITY
+int cmdcmp(const char *tmp1, const char *tmp2, size_t count)
+{
+	int i;
+	for (i = 0; i < count; i++) {
+		if (tmp1[i] != tmp2[i]) {
+			return -1;
+		}
+	}
+	return 0;
+}
+#endif
+
 int i2c_write(struct nfc_dev *nfc_dev, const char *buf, size_t count,
 	      int max_retry_cnt)
 {
@@ -193,6 +212,49 @@ int i2c_write(struct nfc_dev *nfc_dev, const char *buf, size_t count,
 	int retry_cnt;
 	uint16_t i = 0;
 	uint16_t disp_len = GET_IPCLOG_MAX_PKT_LEN(count);
+
+	#ifdef OPLUS_BUG_STABILITY
+        int retrycount = 0;
+	char *wakeup_cmd = NULL;
+	const char on_unlocked[] = {0x20, 0x09, 0x01, 0x00};
+	const char on_locked[] = {0x20, 0x09, 0x01, 0x02};
+	const char off_locked[] = {0x20, 0x09, 0x01, 0x03};
+	const char polling_disabled[] = {0x20, 0x02, 0x04, 0x01, 0x02, 0x01, 0x00};
+	const char deactivate[] = {0x21, 0x06, 0x01, 0x00};
+	if (cmdcmp(buf, on_unlocked, sizeof(on_unlocked)) == 0
+		||cmdcmp(buf, on_locked, sizeof(on_locked)) == 0
+		||cmdcmp(buf, off_locked, sizeof(off_locked)) == 0
+		||cmdcmp(buf, deactivate, sizeof(deactivate)) == 0
+		||cmdcmp(buf, polling_disabled, sizeof(polling_disabled)) == 0) {
+		wakeup_cmd = kzalloc(NCI_GET_FW_CMD_LEN + 1, GFP_KERNEL);
+		if (!wakeup_cmd) {
+		    pr_err("%s: kzalloc wakeup_cmd failed\n",__func__);
+		    ret = -ENOMEM;
+		    goto out_free;
+		}
+
+		wakeup_cmd[0] = 0x00;
+
+		ret = i2c_master_send(nfc_dev->i2c_dev.client, wakeup_cmd, NCI_GET_FW_CMD_LEN);
+		usleep_range(1000, 1100);
+		if (ret < 0) {
+		    pr_err("%s: failed to write wakeup_cmd \n", __func__);
+                   /*wake up cmd maybe not write successfully, retry to wake up*/
+		    while (retrycount++ < MAX_RETRY_COUNT) {
+		        ret = i2c_master_send(nfc_dev->i2c_dev.client, wakeup_cmd, NCI_GET_FW_CMD_LEN);
+		        if (ret >= 0) {
+                            pr_err("%s: succeed to write wakeup_cmd\n", __func__);
+		            break;
+		        } else {
+                            pr_err("%s: failed to write wakeup_cmd %d, retry for %d times\n", __func__, ret, retrycount);
+		        }
+                        usleep_range(1000, 1100);
+                     }
+		} else {
+		     pr_err("%s: succeed to write wakeup_cmd\n", __func__);
+		}
+	}
+	#endif
 
 	if (count > MAX_DL_BUFFER_SIZE)
 		count = MAX_DL_BUFFER_SIZE;
@@ -219,6 +281,13 @@ int i2c_write(struct nfc_dev *nfc_dev, const char *buf, size_t count,
 		} else if (ret == count)
 			break;
 	}
+
+#ifdef OPLUS_BUG_STABILITY
+out_free:
+	if (wakeup_cmd != NULL) {
+	    kfree(wakeup_cmd);
+	}
+#endif
 	return ret;
 }
 
@@ -286,8 +355,10 @@ int nfc_i2c_dev_probe(struct i2c_client *client, const struct i2c_device_id *id)
 	struct platform_gpio *nfc_gpio = &nfc_configs.gpio;
 
 	pr_debug("%s: enter\n", __func__);
-
-	//retrieve details of gpios from dt
+        //#ifdef OPLUS_FEATURE_CONNFCSOFT
+        CHECK_NFC_CHIP(SN100T);
+        //#endif /* OPLUS_FEATURE_CONNFCSOFT */
+        //retrieve details of gpios from dt
 
 	ret = nfc_parse_dt(&client->dev, &nfc_configs, PLATFORM_IF_I2C);
 	if (ret) {
@@ -544,7 +615,7 @@ static struct i2c_driver nfc_i2c_dev_driver = {
 	.probe = nfc_i2c_dev_probe,
 	.remove = nfc_i2c_dev_remove,
 	.driver = {
-		.name = NFC_I2C_DRV_STR,
+		.name = "nq-nci",
 		.pm = &nfc_i2c_dev_pm_ops,
 		.of_match_table = nfc_i2c_dev_match_table,
 		.probe_type = PROBE_PREFER_ASYNCHRONOUS,

@@ -193,6 +193,11 @@ extern void set_cpu_array(void);
 extern int core_ctl_init(void);
 extern int input_boost_init(void);
 extern int core_ctl_init(void);
+#ifdef CONFIG_OPLUS_FEATURE_INPUT_BOOST
+extern int frame_boost_init(void);
+extern int frame_boost_group_init(void);
+extern int frame_info_init(void);
+#endif
 
 extern atomic64_t walt_irq_work_lastq_ws;
 extern unsigned int __read_mostly sched_ravg_window;
@@ -313,6 +318,9 @@ extern unsigned int sched_lib_mask_force;
 #define WALT_CPUFREQ_PL			(1U << 3)
 #define WALT_CPUFREQ_EARLY_DET		(1U << 4)
 #define WALT_CPUFREQ_BOOST_UPDATE	(1U << 5)
+#ifdef CONFIG_OPLUS_FEATURE_INPUT_BOOST
+#define WALT_CPUFREQ_FORCE_UPDATE	(1U << 6)
+#endif
 
 #define NO_BOOST 0
 #define FULL_THROTTLE_BOOST 1

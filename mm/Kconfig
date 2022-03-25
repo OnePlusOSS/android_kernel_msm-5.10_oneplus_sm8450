@@ -888,4 +888,7 @@ config ARCH_HAS_HUGEPD
 config MAPPING_DIRTY_HELPERS
         bool
 
+#ifdef OPLUS_FEATURE_PERFORMANCE_MM
+source "mm/oplus_perf_mm/Kconfig"
+#endif /* OPLUS_FEATURE_PERFORMANCE_MM */
 endmenu

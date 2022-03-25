@@ -15,6 +15,10 @@
 #define MAX_CPUS_PER_CLUSTER 6
 #define MAX_CLUSTERS 3
 
+#ifdef CONFIG_OPLUS_FEATURE_INPUT_BOOST
+struct frame_boost_group;
+#endif
+
 struct core_ctl_notif_data {
 	unsigned int nr_big;
 	unsigned int coloc_load_pct;
@@ -120,6 +124,11 @@ struct walt_task_struct {
 	u64				total_exec;
 	int				mvp_prio;
 	u8				hung_detect_status;
+#ifdef CONFIG_OPLUS_FEATURE_INPUT_BOOST
+	struct frame_boost_group __rcu *fbg;
+	struct list_head fbg_list;
+	int fbg_depth;
+#endif
 };
 
 #define wts_to_ts(wts) ({ \

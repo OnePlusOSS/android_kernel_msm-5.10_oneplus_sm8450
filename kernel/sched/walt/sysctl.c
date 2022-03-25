@@ -15,6 +15,13 @@ static int __maybe_unused two = 2;
 static int __maybe_unused four = 4;
 static int one_hundred = 100;
 static int one_thousand = 1000;
+#ifdef CONFIG_OPLUS_FEATURE_INPUT_BOOST
+extern int sysctl_slide_boost_enabled;
+extern int sysctl_boost_task_threshold;
+extern int sysctl_frame_rate;
+extern int sysctl_input_boost_enabled;
+extern int oplus_input_boost_ctrl_handler(struct ctl_table * table, int write, void __user * buffer, size_t * lenp, loff_t * ppos);
+#endif
 
 /*
  * CFS task prio range is [100 ... 139]
@@ -449,7 +456,7 @@ struct ctl_table input_boost_sysctls[] = {
 		.procname	= "input_boost_freq",
 		.data		= &sysctl_input_boost_freq,
 		.maxlen		= sizeof(unsigned int) * 8,
-		.mode		= 0644,
+		.mode		= 0664,
 		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= SYSCTL_ZERO,
 		.extra2		= SYSCTL_INT_MAX,
@@ -860,6 +867,36 @@ struct ctl_table walt_table[] = {
 		.extra1		= SYSCTL_ZERO,
 		.extra2		= SYSCTL_ONE,
 	},
+#ifdef CONFIG_OPLUS_FEATURE_INPUT_BOOST
+	{
+		.procname	= "slide_boost_enabled",
+		.data		= &sysctl_slide_boost_enabled,
+		.maxlen		= sizeof(unsigned int),
+		.mode		= 0666,
+		.proc_handler	= proc_dointvec,
+	},
+	{
+		.procname	= "boost_task_threshold",
+		.data		= &sysctl_boost_task_threshold,
+		.maxlen		= sizeof(unsigned int),
+		.mode		= 0666,
+		.proc_handler	= proc_dointvec,
+	},
+	{
+		.procname	= "frame_rate",
+		.data		= &sysctl_frame_rate,
+		.maxlen		= sizeof(unsigned int),
+		.mode		= 0666,
+		.proc_handler	= proc_dointvec,
+	},
+	{
+		.procname	= "input_boost_enabled",
+		.data		= &sysctl_input_boost_enabled,
+		.maxlen		= sizeof(unsigned int),
+		.mode		= 0666,
+		.proc_handler	= oplus_input_boost_ctrl_handler,
+	},
+#endif
 	{
 		.procname	= "sched_asymcap_boost",
 		.data		= &sysctl_sched_asymcap_boost,

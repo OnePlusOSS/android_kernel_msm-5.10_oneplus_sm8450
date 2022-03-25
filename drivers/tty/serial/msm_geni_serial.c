@@ -3377,6 +3377,11 @@ static int msm_geni_serial_read_dtsi(struct platform_device *pdev,
 	return ret;
 }
 
+#ifdef OPLUS_FEATURE_CHG_BASIC
+static struct pinctrl *serial_pinctrl = NULL;
+static struct pinctrl_state *serial_pinctrl_state_disable = NULL;
+#endif
+
 static int msm_geni_serial_probe(struct platform_device *pdev)
 {
 	int ret = 0;
@@ -3395,7 +3400,26 @@ static int msm_geni_serial_probe(struct platform_device *pdev)
 	}
 	dev_dbg(&pdev->dev, "%s: %s\n", __func__, id->compatible);
 	drv = (struct uart_driver *)id->data;
+#ifdef OPLUS_FEATURE_CHG_BASIC
+        if (!con_enabled) {
+                if (drv->cons) {
+                        serial_pinctrl = devm_pinctrl_get(&pdev->dev);
+                        if (IS_ERR_OR_NULL(serial_pinctrl)) {
+                                dev_err(&pdev->dev, "No serial_pinctrl config specified!\n");
+                        } else {
+                                serial_pinctrl_state_disable = pinctrl_lookup_state(serial_pinctrl, PINCTRL_SLEEP);
+                                if (IS_ERR_OR_NULL(serial_pinctrl_state_disable)) {
+                                        dev_err(&pdev->dev, "No serial_pinctrl_state_disable config specified!\n");
+                                } else {
+                                        pinctrl_select_state(serial_pinctrl, serial_pinctrl_state_disable);
+                                }
+                        }
 
+                        dev_info(&pdev->dev, "boot with console false\n");
+                       // return -ENODEV;
+                }
+        }
+#endif
 	if (pdev->dev.of_node) {
 		if (drv->cons) {
 			line = of_alias_get_id(pdev->dev.of_node, "serial");

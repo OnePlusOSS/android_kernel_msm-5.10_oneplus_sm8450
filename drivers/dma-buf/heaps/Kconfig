@@ -86,6 +86,11 @@ config QCOM_DMABUF_HEAPS_CARVEOUT
 	  Choose this option to build the QCOM DMA-BUF Carveout heap.
 	  If in doubt, say Y here.
 
+config OPLUS_FEATURE_MM_BOOSTPOOL
+        bool "Oplus DMA-BUF heaps boost-pool library "
+        depends on QCOM_DMABUF_HEAPS && QCOM_DMABUF_HEAPS_SYSTEM
+        help
+          Choose this option to enable the DMA-BUF heaps boost-pool library.
 config QCOM_DMABUF_HEAPS_BITSTREAM_CONTIG
 	bool "QCOM DMA-BUF Bitstream Contiguous Heap"
 	depends on QCOM_DMABUF_HEAPS && QCOM_SECURE_BUFFER

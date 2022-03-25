@@ -8,6 +8,13 @@
 #include "walt.h"
 #include "trace.h"
 
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_SCHED_ASSIST)
+#include <../../oplus_perf_sched/sched_assist/sa_fair.h>
+#endif
+#ifdef CONFIG_OPLUS_FEATURE_INPUT_BOOST
+#include "tuning/frame_boost_group.h"
+#endif
+
 static inline unsigned long walt_lb_cpu_util(int cpu)
 {
 	struct walt_rq *wrq = (struct walt_rq *) cpu_rq(cpu)->android_vendor_data1;
@@ -187,6 +194,10 @@ static void walt_lb_check_for_rotation(struct rq *src_rq)
 
 		wts = (struct walt_task_struct *) rq->curr->android_vendor_data1;
 		run = wc - wts->last_enqueued_ts;
+#ifdef CONFIG_OPLUS_FEATURE_INPUT_BOOST
+		if (wts->fbg_depth != 0)
+			continue;
+#endif
 
 		if (run < WALT_ROTATION_THRESHOLD_NS)
 			continue;
@@ -243,11 +254,23 @@ static inline bool _walt_can_migrate_task(struct task_struct *p, int dst_cpu,
 			return false;
 		if (walt_pipeline_low_latency_task(p))
 			return false;
+#ifdef CONFIG_OPLUS_FEATURE_INPUT_BOOST
+		if (wts->fbg_depth != 0)
+			return false;
+#endif
 	}
 
 	/* Don't detach task if it is under active migration */
 	if (wrq->push_task == p)
 		return false;
+
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_SCHED_ASSIST)
+	if (!task_tpd_check(p, dst_cpu))
+		return false;
+
+	if (should_ux_task_skip_cpu(p, dst_cpu))
+		return false;
+#endif
 
 	return true;
 }
@@ -518,6 +541,18 @@ void walt_lb_tick(struct rq *rq)
 	unsigned long flags;
 	struct walt_rq *wrq = (struct walt_rq *) rq->android_vendor_data1;
 	struct walt_task_struct *wts = (struct walt_task_struct *) p->android_vendor_data1;
+#ifdef CONFIG_OPLUS_FEATURE_INPUT_BOOST
+	bool need_up_migrate = false;
+	struct cpumask *rtg_target = find_rtg_target(p);
+	if (rtg_target && (capacity_orig_of(prev_cpu) < capacity_orig_of(cpumask_first(rtg_target)))) {
+		need_up_migrate = true;
+	}
+#endif
+
+	raw_spin_lock(&rq->lock);
+	if (available_idle_cpu(prev_cpu) && is_reserved(prev_cpu) && !rq->active_balance)
+		clear_reserved(prev_cpu);
+	raw_spin_unlock(&rq->lock);
 
 	raw_spin_lock(&rq->lock);
 	if (available_idle_cpu(prev_cpu) && is_reserved(prev_cpu) && !rq->active_balance)
@@ -529,7 +564,11 @@ void walt_lb_tick(struct rq *rq)
 
 	walt_cfs_tick(rq);
 
+#ifdef CONFIG_OPLUS_FEATURE_INPUT_BOOST
+	if (!rq->misfit_task_load && !need_up_migrate)
+#else
 	if (!rq->misfit_task_load)
+#endif
 		return;
 
 	if (p->state != TASK_RUNNING || p->nr_cpus_allowed == 1)
@@ -537,7 +576,11 @@ void walt_lb_tick(struct rq *rq)
 
 	raw_spin_lock_irqsave(&walt_lb_migration_lock, flags);
 
+#ifdef CONFIG_OPLUS_FEATURE_INPUT_BOOST
+	if (walt_rotation_enabled && !need_up_migrate) {
+#else
 	if (walt_rotation_enabled) {
+#endif
 		walt_lb_check_for_rotation(rq);
 		goto out_unlock;
 	}

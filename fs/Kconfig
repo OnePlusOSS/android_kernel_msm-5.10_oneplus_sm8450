@@ -347,6 +347,10 @@ source "fs/nls/Kconfig"
 source "fs/dlm/Kconfig"
 source "fs/unicode/Kconfig"
 
+#ifdef OPLUS_FEATURE_PERFORMANCE_FS
+source "fs/oplus_perf_fs/Kconfig"
+#endif /* OPLUS_FEATURE_PERFORMANCE_FS */
+
 config IO_WQ
 	bool
 
