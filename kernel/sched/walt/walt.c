@@ -22,6 +22,17 @@
 #include "walt.h"
 #include "trace.h"
 
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_OCH)
+#include <linux/cpufreq_health.h>
+#endif
+
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_GKI_CPUFREQ_BOUNCING)
+#include <linux/cpufreq_bouncing.h>
+#endif
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_SCHED_ASSIST)
+#include <../kernel/oplus_cpu/sched/sched_assist/sa_fair.h>
+#endif
+
 const char *task_event_names[] = {
 	"PUT_PREV_TASK",
 	"PICK_NEXT_TASK",
@@ -562,7 +573,11 @@ should_apply_suh_freq_boost(struct walt_sched_cluster *cluster)
 	return is_cluster_hosting_top_app(cluster);
 }
 
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_OCH)
+static inline u64 freq_policy_load(struct rq *rq, int *edtask_flag)
+#else
 static inline u64 freq_policy_load(struct rq *rq)
+#endif
 {
 	struct walt_rq *wrq = (struct walt_rq *) rq->android_vendor_data1;
 	struct walt_sched_cluster *cluster = wrq->cluster;
@@ -572,6 +587,9 @@ static inline u64 freq_policy_load(struct rq *rq)
 
 	if (wrq->ed_task != NULL) {
 		load = sched_ravg_window;
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_OCH)
+		*edtask_flag = 1;
+#endif
 		goto done;
 	}
 
@@ -612,8 +630,15 @@ __cpu_util_freq_walt(int cpu, struct walt_cpu_load *walt_load)
 	unsigned long capacity = capacity_orig_of(cpu);
 	struct walt_rq *wrq = (struct walt_rq *) rq->android_vendor_data1;
 
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_OCH)
+	int edtask_flag = 0;
+	util = div64_u64(freq_policy_load(rq, &edtask_flag),
+                        sched_ravg_window >> SCHED_CAPACITY_SHIFT);
+	cpufreq_health_get_edtask_state(cpu, edtask_flag);
+#else
 	util = div64_u64(freq_policy_load(rq),
 			sched_ravg_window >> SCHED_CAPACITY_SHIFT);
+#endif
 
 	if (walt_load) {
 		u64 nl = wrq->nt_prev_runnable_sum +
@@ -1933,6 +1958,10 @@ static void update_history(struct rq *rq, struct task_struct *p,
 				wts->unfilter - wrq->prev_window_size);
 
 done:
+#ifdef CONFIG_OPLUS_FEATURE_SCHED_SPREAD
+	if (p == rq->curr && p == current && event != PUT_PREV_TASK && walt_fair_task(p))
+		update_load_flag(p, rq);
+#endif /* CONFIG_OPLUS_FEATURE_SCHED_SPREAD */
 	trace_sched_update_history(rq, p, runtime, samples, event, wrq, wts);
 }
 
@@ -3385,6 +3414,16 @@ static void walt_irq_work(struct irq_work *irq_work)
 	unsigned long flags;
 	struct walt_rq *wrq;
 
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_GKI_CPUFREQ_BOUNCING)
+	for_each_sched_cluster(cluster) {
+		int cpu = cpumask_first(&cluster->cpus);
+		struct cpufreq_policy *pol = cpufreq_cpu_get_raw(cpu);
+
+		if (pol)
+			cb_update(pol, walt_ktime_get_ns());
+	}
+#endif
+
 	/* Am I the window rollover work or the migration work? */
 	if (irq_work == &walt_migration_irq_work)
 		is_migration = true;
@@ -3713,6 +3752,10 @@ static void inc_rq_walt_stats(struct rq *rq, struct task_struct *p)
 	wts->rtg_high_prio = task_rtg_high_prio(p);
 	if (wts->rtg_high_prio)
 		wrq->walt_stats.nr_rtg_high_prio_tasks++;
+
+#ifdef CONFIG_OPLUS_FEATURE_SCHED_SPREAD
+	inc_ld_stats(p, rq);
+#endif /* CONFIG_OPLUS_FEATURE_SCHED_SPREAD */
 }
 
 static void dec_rq_walt_stats(struct rq *rq, struct task_struct *p)
@@ -3726,6 +3769,9 @@ static void dec_rq_walt_stats(struct rq *rq, struct task_struct *p)
 	if (wts->rtg_high_prio)
 		wrq->walt_stats.nr_rtg_high_prio_tasks--;
 
+#ifdef CONFIG_OPLUS_FEATURE_SCHED_SPREAD
+	dec_ld_stats(p, rq);
+#endif /* CONFIG_OPLUS_FEATURE_SCHED_SPREAD */
 	BUG_ON(wrq->walt_stats.nr_big_tasks < 0);
 }
 
@@ -3741,7 +3787,9 @@ static void walt_cpu_frequency_limits(void *unused, struct cpufreq_policy *polic
 {
 	if (unlikely(walt_disabled))
 		return;
-
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_OCH)
+	cpufreq_health_get_state(policy);
+#endif
 	cpu_cluster(policy->cpu)->max_freq = policy->max;
 }
 
@@ -3977,6 +4025,7 @@ static void android_rvh_try_to_wake_up(void *unused, struct task_struct *p)
 
 	if (unlikely(walt_disabled))
 		return;
+
 	rq_lock_irqsave(rq, &rf);
 	old_load = task_load(p);
 	wallclock = walt_ktime_get_ns();

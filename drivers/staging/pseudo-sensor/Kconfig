@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: GPL-2.0
+config PSEUDO_SENSOR
+    tristate "Allow pseudo sensor debugging interface"
+    default n
+    help
+      This module adds support pseudo sensor.
+      Enable pseudo sensor debugging interface
+      The driver creates a series of interfaces in the /proc for user mode
+      The driver provides contiguous memory for SLPI use
+
+

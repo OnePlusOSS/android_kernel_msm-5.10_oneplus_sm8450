@@ -303,6 +303,7 @@ struct nfc_dev {
 	uint8_t fw_major_version;
 	bool is_vreg_enabled;
 	bool is_ese_session_active;
+        bool release_read;
 	struct i2c_dev i2c_dev;
 	struct platform_configs configs;
 	struct cold_reset cold_reset;
@@ -324,6 +325,7 @@ struct nfc_dev {
 };
 
 int nfc_dev_open(struct inode *inode, struct file *filp);
+int nfc_dev_flush(struct file *pfile, fl_owner_t id);
 int nfc_dev_close(struct inode *inode, struct file *filp);
 long nfc_dev_ioctl(struct file *pfile, unsigned int cmd, unsigned long arg);
 int nfc_parse_dt(struct device *dev, struct platform_configs *nfc_configs,

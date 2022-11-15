@@ -159,6 +159,9 @@ struct kgsl_driver {
 	unsigned int full_cache_threshold;
 	struct workqueue_struct *workqueue;
 	struct workqueue_struct *mem_workqueue;
+
+	struct kthread_worker RT_worker;
+	struct task_struct *RT_worker_thread;
 };
 
 extern struct kgsl_driver kgsl_driver;
@@ -335,7 +338,7 @@ struct kgsl_event {
 	void *priv;
 	struct list_head node;
 	unsigned int created;
-	struct work_struct work;
+	struct kthread_work work;
 	int result;
 	struct kgsl_event_group *group;
 };

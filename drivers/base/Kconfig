@@ -210,4 +210,5 @@ config GENERIC_ARCH_TOPOLOGY
 	  appropriate scaling, sysfs interface for reading capacity values at
 	  runtime.
 
+source "drivers/base/kernelFwUpdate/Kconfig"
 endmenu

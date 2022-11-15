@@ -429,6 +429,12 @@ static irqreturn_t tcs_tx_done(int irq, void *p)
 
 	irq_status = readl_relaxed(drv->tcs_base + RSC_DRV_IRQ_STATUS);
 
+	if (bitmap_empty(drv->tcs_in_use, MAX_TCS_NR)) {
+		ipc_log_string(drv->ipc_log_ctx, "Spurious IRQ: status=%lu", irq_status);
+		writel_relaxed(irq_status, drv->tcs_base + RSC_DRV_IRQ_CLEAR);
+		return IRQ_HANDLED;
+	}
+
 	for_each_set_bit(i, &irq_status, BITS_PER_LONG) {
 		req = get_req_from_tcs(drv, i);
 		if (!req) {

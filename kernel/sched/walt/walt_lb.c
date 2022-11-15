@@ -8,6 +8,13 @@
 #include "walt.h"
 #include "trace.h"
 
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_SCHED_ASSIST)
+#include <../../oplus_cpu/sched/sched_assist/sa_fair.h>
+#endif
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_FRAME_BOOST)
+#include <../kernel/oplus_cpu/sched/frame_boost/frame_group.h>
+#endif
+
 static inline unsigned long walt_lb_cpu_util(int cpu)
 {
 	struct walt_rq *wrq = (struct walt_rq *) cpu_rq(cpu)->android_vendor_data1;
@@ -185,6 +192,11 @@ static void walt_lb_check_for_rotation(struct rq *src_rq)
 		if (rq->nr_running > 1)
 			continue;
 
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_FRAME_BOOST)
+		if (fbg_skip_migration(rq->curr, i, src_cpu))
+			continue;
+#endif
+
 		wts = (struct walt_task_struct *) rq->curr->android_vendor_data1;
 		run = wc - wts->last_enqueued_ts;
 
@@ -253,6 +265,22 @@ static inline bool _walt_can_migrate_task(struct task_struct *p, int dst_cpu,
 		if (!force && !task_fits_max(p, dst_cpu))
 			return false;
 	}
+
+	/* Don't detach task if it is under active migration */
+	if (wrq->push_task == p)
+		return false;
+
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_SCHED_ASSIST)
+	if (!task_tpd_check(p, dst_cpu))
+		return false;
+
+	if (should_ux_task_skip_cpu(p, dst_cpu))
+		return false;
+#endif
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_FRAME_BOOST)
+	if (fbg_skip_migration(p, task_cpu(p), dst_cpu))
+		return false;
+#endif
 
 	return true;
 }
@@ -594,6 +622,17 @@ void walt_lb_tick(struct rq *rq)
 	unsigned long flags;
 	struct walt_rq *wrq = (struct walt_rq *) rq->android_vendor_data1;
 	struct walt_task_struct *wts = (struct walt_task_struct *) p->android_vendor_data1;
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_FRAME_BOOST)
+	bool need_up_migrate = false;
+
+	if (fbg_need_up_migration(p, rq))
+		need_up_migrate = true;
+#endif
+
+	raw_spin_lock(&rq->lock);
+	if (available_idle_cpu(prev_cpu) && is_reserved(prev_cpu) && !rq->active_balance)
+		clear_reserved(prev_cpu);
+	raw_spin_unlock(&rq->lock);
 
 	raw_spin_lock(&rq->lock);
 	if (available_idle_cpu(prev_cpu) && is_reserved(prev_cpu) && !rq->active_balance)
@@ -605,7 +644,11 @@ void walt_lb_tick(struct rq *rq)
 
 	walt_cfs_tick(rq);
 
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_FRAME_BOOST)
+	if (!rq->misfit_task_load && !need_up_migrate)
+#else
 	if (!rq->misfit_task_load)
+#endif
 		return;
 
 	if (p->state != TASK_RUNNING || p->nr_cpus_allowed == 1)
@@ -703,6 +746,11 @@ static bool walt_balance_rt(struct rq *this_rq)
 	wts = (struct walt_task_struct *) p->android_vendor_data1;
 	if (walt_ktime_get_ns() - wts->last_wake_ts < WALT_RT_PULL_THRESHOLD_NS)
 		goto unlock;
+
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_FRAME_BOOST)
+	if (!fbg_rt_task_fits_capacity(p, this_cpu))
+		goto unlock;
+#endif
 
 	pulled = true;
 	deactivate_task(src_rq, p, 0);
@@ -850,13 +898,19 @@ static void walt_newidle_balance(void *unused, struct rq *this_rq,
 				goto found_busy_cpu;
 		}
 
-		/* help the farthest cluster indirectly if it needs help */
+		/*
+		 * help the farthest cluster by kicking an idle cpu in the next
+		 * cluster. In case no idle is found, pull it in.
+		 */
 		busy_cpu = walt_lb_find_busiest_cpu(this_cpu, &cpu_array[order_index][2],
 				&has_misfit);
 		if (busy_cpu != -1) {
 			first_idle =
 				find_first_idle_if_others_are_busy(&cpu_array[order_index][1]);
-			kick_first_idle(first_idle);
+			if (first_idle != -1)
+				kick_first_idle(first_idle);
+			else
+				goto found_busy_cpu;
 		}
 	} else if (order_index == 2) {
 		busy_cpu = walt_lb_find_busiest_cpu(this_cpu, &cpu_array[order_index][0],

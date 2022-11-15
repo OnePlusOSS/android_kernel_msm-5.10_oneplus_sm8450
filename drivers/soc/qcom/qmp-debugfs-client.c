@@ -12,6 +12,7 @@
 #include <linux/mailbox/qmp.h>
 #include <linux/uaccess.h>
 #include <linux/mailbox_controller.h>
+#include <linux/proc_fs.h>
 
 #define MAX_MSG_SIZE 96 /* Imposed by the remote*/
 
@@ -66,11 +67,14 @@ static ssize_t aop_msg_write(struct file *file, const char __user *userstr,
 static const struct file_operations aop_msg_fops = {
 	.write = aop_msg_write,
 };
+static const struct proc_ops aop_msg_proc_fops = {
+	.proc_write = aop_msg_write,
+};
 
 static int qmp_msg_probe(struct platform_device *pdev)
 {
-	struct dentry *file;
-
+	//struct dentry *file;
+	struct proc_dir_entry *file = NULL;
 	cl = devm_kzalloc(&pdev->dev, sizeof(*cl), GFP_KERNEL);
 	if (!cl)
 		return -ENOMEM;
@@ -85,9 +89,9 @@ static int qmp_msg_probe(struct platform_device *pdev)
 		dev_err(&pdev->dev, "Failed to mbox channel\n");
 		return PTR_ERR(chan);
 	}
-
-	file = debugfs_create_file("aop_send_message", 0220, NULL, NULL,
-			&aop_msg_fops);
+	file = proc_create("aop_send_message", 0222, NULL, &aop_msg_proc_fops);
+	//file = debugfs_create_file("aop_send_message", 0220, NULL, NULL,
+	//		&aop_msg_fops);
 	if (!file)
 		goto err;
 	return 0;
@@ -112,3 +116,4 @@ static struct platform_driver aop_qmp_msg_driver = {
 	},
 };
 builtin_platform_driver(aop_qmp_msg_driver);
+MODULE_LICENSE("GPL v2");

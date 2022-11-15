@@ -29,3 +29,10 @@ obj-$(CONFIG_INPUT_MISC)	+= misc/
 obj-$(CONFIG_INPUT_APMPOWER)	+= apm-power.o
 
 obj-$(CONFIG_RMI4_CORE)		+= rmi4/
+
+obj-$(CONFIG_OPLUS_FINGERPRINT) += oplus_fp_driver/
+
+#ifdef OPLUS_FEATURE_SECURITY_COMMON
+# 2021/09/04 add for oplus secure
+obj-$(CONFIG_OPLUS_SECURE)  += oplus_secure_drivers/
+#endif /* OPLUS_FEATURE_SECURITY_COMMON */

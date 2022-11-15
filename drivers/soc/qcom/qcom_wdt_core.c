@@ -37,6 +37,13 @@
 typedef int (*compare_t) (const void *lhs, const void *rhs);
 static struct msm_watchdog_data *wdog_data;
 
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_QCOM_WATCHDOG)
+extern void oplus_dump_cpu_online_smp_call(void);
+extern void oplus_get_cpu_ping_mask(cpumask_t *pmask, int *cpu_idle_pc_state);
+extern void oplus_dump_wdog_cpu(struct task_struct *w_task);
+extern void oplus_show_utc_time(void);
+#endif
+
 static void qcom_wdt_dump_cpu_alive_mask(struct msm_watchdog_data *wdog_dd)
 {
 	static char alive_mask_buf[MASK_SIZE];
@@ -610,6 +617,10 @@ static void qcom_wdt_ping_other_cpus(struct msm_watchdog_data *wdog_dd)
 {
 	int cpu;
 
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_QCOM_WATCHDOG)
+	cpumask_t mask;
+	oplus_get_cpu_ping_mask(&mask, wdog_dd->cpu_idle_pc_state);
+#endif
 	cpumask_clear(&wdog_dd->alive_mask);
 	/* Make sure alive mask is cleared and set in order */
 	smp_mb();
@@ -675,6 +686,10 @@ static __ref int qcom_wdt_kthread(void *arg)
 			wdog_dd->ops->reset_wdt(wdog_dd);
 			wdog_dd->last_pet = sched_clock();
 		}
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_QCOM_WATCHDOG)
+		/* for UCT time print, over 30s print once */
+		oplus_show_utc_time();
+#endif
 		/* Check again before scheduling
 		 * Could have been changed on other cpu
 		 */
@@ -798,7 +813,13 @@ static irqreturn_t qcom_wdt_bark_handler(int irq, void *dev_id)
 	if (wdog_dd->freeze_in_progress)
 		dev_info(wdog_dd->dev, "Suspend in progress\n");
 
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_QCOM_WATCHDOG)
+	oplus_dump_cpu_online_smp_call();
+	oplus_dump_wdog_cpu(wdog_dd->watchdog_task);
+	panic("Handle a watchdog bite! - Falling back to kernel panic!");
+#else
 	qcom_wdt_trigger_bite();
+#endif
 
 	return IRQ_HANDLED;
 }
