@@ -880,6 +880,25 @@ request_firmware(const struct firmware **firmware_p, const char *name,
 }
 EXPORT_SYMBOL(request_firmware);
 
+#ifdef OPLUS_FEATURE_WIFI_BDF
+//Add for: reload wlan bdf without using cache
+int
+request_firmware_no_cache(const struct firmware **firmware_p, const char *name,
+                 struct device *device)
+{
+        int ret;
+
+        /* Need to pin this module until return */
+        __module_get(THIS_MODULE);
+        ret = _request_firmware(firmware_p, name, device, NULL, 0, 0,
+                                FW_OPT_UEVENT | FW_OPT_NOCACHE);
+        module_put(THIS_MODULE);
+        return ret;
+}
+EXPORT_SYMBOL(request_firmware_no_cache);
+#endif /* OPLUS_FEATURE_WIFI_BDF */
+
+
 /**
  * firmware_request_nowarn() - request for an optional fw module
  * @firmware: pointer to firmware image

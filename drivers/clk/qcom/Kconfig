@@ -10,6 +10,12 @@ config QCOM_GDSC
 config QCOM_RPMCC
 	bool
 
+config OPLUS_POWERINFO_STANDBY_DEBUG
+	bool "powerinfo standby config"
+	default n
+	help
+	  Select this config to enable powerinfo standby debug
+
 menuconfig COMMON_CLK_QCOM
 	tristate "Support for Qualcomm's clock controllers"
 	depends on OF
@@ -944,5 +950,68 @@ config SXR_CAMCC_ANORAK
 	  ANORAK devices.
 	  Say Y if you want to support camera devices and functionality such as
 	  capturing pictures.
+
+config SXR_DISPCC_ANORAK
+	tristate "ANORAK Display Clock Controller"
+	select SXR_GCC_ANORAK
+	help
+	  Support for the display clock controller on Qualcomm Technologies, Inc
+	  ANORAK devices.
+	  Say Y if you want to support display devices and functionality such as
+	  splash screen.
+
+config SXR_DEBUGCC_ANORAK
+	tristate "ANORAK Debug Clock Controller"
+	depends on SXR_GCC_ANORAK
+	help
+	  Support for the debug clock controller on Qualcomm Technologies, Inc.
+	  ANORAK devices.
+	  Say Y if you want to support the debug clocks such as clock measurement
+	  functionality.
+
+config SM_GCC_RAVELIN
+	tristate "RAVELIN Global Clock Controller"
+	depends on COMMON_CLK_QCOM
+	help
+	  Support for the global clock controller on Qualcomm Technologies, Inc
+	  RAVELIN devices.
+	  Say Y if you want to use peripheral devices such as UART, SPI, I2C,
+	  USB, UFS, SD/eMMC, PCIe, Video, etc.
+
+config SM_CAMCC_RAVELIN
+	tristate "RAVELIN Camera Clock Controller"
+	select SM_GCC_RAVELIN
+	help
+	  Support for the camera clock controller on Qualcomm Technologies, Inc.
+	  RAVELIN devices.
+	  Say Y if you want to support camera devices and functionality such as
+	  capturing photos.
+
+config SM_DISPCC_RAVELIN
+	tristate "RAVELIN Display Clock Controller"
+	select SM_GCC_RAVELIN
+	help
+	  Support for the display clock controller on Qualcomm Technologies, Inc
+	  RAVELIN devices.
+	  Say Y if you want to support display devices and functionality such as
+	  splash screen.
+
+config SM_GPUCC_RAVELIN
+	tristate "RAVELIN Graphics Clock Controller"
+	select SM_GCC_RAVELIN
+	help
+	  Support for the graphics clock controller on Qualcomm Technologies, Inc.
+	  RAVELIN devices.
+	  Say Y if you want to support graphics controller devices and
+	  functionality such as 3D-graphics.
+
+config SM_DEBUGCC_RAVELIN
+	tristate "RAVELIN Debug Clock Controller"
+	depends on SM_GCC_RAVELIN
+	help
+	  Support for the debug clock controller on Qualcomm Technologies, Inc.
+	  RAVELIN devices.
+	  Say Y if you want to support the debug clocks such as clock measurement
+	  functionality.
 
 endif

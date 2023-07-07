@@ -139,6 +139,10 @@ void *qcom_mdt_read_metadata(struct device *dev, const struct firmware *fw, cons
 	ehdr_size = phdrs[0].p_filesz;
 	hash_size = phdrs[hash_index].p_filesz;
 
+	/* Overflow check */
+	if (ehdr_size >  SIZE_MAX - hash_size)
+		return ERR_PTR(-ENOMEM);
+
 	/*
 	 * During the scm call memory protection will be enabled for the meta
 	 * data blob, so make sure it's physically contiguous, 4K aligned and
@@ -360,27 +364,23 @@ static int __qcom_mdt_load(struct device *dev, const struct firmware *fw, const 
 	if (reloc_base)
 		*reloc_base = mem_reloc;
 deinit:
-	if (ret || !mdata) {
-		if (ret)
-			qcom_scm_pas_shutdown(pas_id);
+	if (ret)
+		qcom_scm_pas_shutdown(pas_id);
 
-		if (mdata) {
-			if (!dma_phys_below_32b) {
-				scm_dev = qcom_get_scm_device();
-				if (!scm_dev)
-					goto out;
+	if (!mdata && pas_init) {
+		if (dma_phys_below_32b) {
+			dma_free_coherent(dev, metadata_len, metadata, metadata_phys);
+		} else {
+			scm_dev = qcom_get_scm_device();
+			if (!scm_dev)
+				goto out;
 
-				dma_free_coherent(scm_dev,
-						mdata->size, mdata->buf, mdata->buf_phys);
-			} else {
-				dma_free_coherent(dev,
-						mdata->size, mdata->buf, mdata->buf_phys);
-			}
+			dma_free_coherent(scm_dev,  metadata_len, metadata, metadata_phys);
 		}
 	}
+
 out:
 	kfree(fw_name);
-
 	return ret;
 }
 

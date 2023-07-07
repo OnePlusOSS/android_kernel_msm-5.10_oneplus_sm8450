@@ -260,19 +260,33 @@ power_off:
 #define GOODIX_SLEEP_CMD	0x84
 int brl_suspend(struct goodix_ts_core *cd)
 {
+#ifdef GOODIX_SUSPEND_GESTURE_ENABLE
 	struct goodix_ts_cmd sleep_cmd;
 
 	sleep_cmd.cmd = GOODIX_SLEEP_CMD;
 	sleep_cmd.len = 4;
 	if (cd->hw_ops->send_cmd(cd, &sleep_cmd))
 		ts_err("failed send sleep cmd");
-
+#else
+	if (cd->hw_ops->power_on(cd, 0))
+		ts_err("failed power off");
+#endif
 	return 0;
 }
 
 int brl_resume(struct goodix_ts_core *cd)
 {
-	return cd->hw_ops->reset(cd, GOODIX_NORMAL_RESET_DELAY_MS);
+	int ret = 0;
+
+#ifdef GOODIX_SUSPEND_GESTURE_ENABLE
+	ret = cd->hw_ops->reset(cd, GOODIX_NORMAL_RESET_DELAY_MS);
+#else
+	ret = cd->hw_ops->power_on(cd, 1);
+	if (ret)
+		ts_err("failed power on");
+#endif
+
+	return ret;
 }
 
 #define GOODIX_GESTURE_CMD_BA	0x12

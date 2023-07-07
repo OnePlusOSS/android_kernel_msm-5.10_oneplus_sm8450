@@ -340,9 +340,9 @@ static int cnss_set_pci_link_status(struct cnss_pci_data *pci_priv,
 int cnss_set_pci_link(struct cnss_pci_data *pci_priv, bool link_up)
 {
 	int ret = 0, retry = 0;
-
+	#ifndef OPLUS_BUG_STABILITY
 	cnss_pr_vdbg("%s PCI link\n", link_up ? "Resuming" : "Suspending");
-
+	#endif /* OPLUS_BUG_STABILITY */
 	if (link_up) {
 retry:
 		ret = cnss_pci_set_link_up(pci_priv);
@@ -446,6 +446,7 @@ static int cnss_pci_smmu_fault_handler(struct iommu_domain *domain,
 		return -ENODEV;
 	}
 
+	pci_priv->is_smmu_fault = true;
 	cnss_pci_update_status(pci_priv, CNSS_FW_DOWN);
 	cnss_force_fw_assert(&pci_priv->pci_dev->dev);
 

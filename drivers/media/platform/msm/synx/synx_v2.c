@@ -10,6 +10,7 @@
 #include <linux/module.h>
 #include <linux/poll.h>
 #include <linux/random.h>
+#include <linux/remoteproc/qcom_rproc.h>
 #include <linux/slab.h>
 #include <linux/sync_file.h>
 #include <linux/uaccess.h>
@@ -518,6 +519,14 @@ void synx_signal_handler(struct work_struct *cb_dispatch)
 			dprintk(SYNX_ERR,
 				"global status update of %u failed=%d\n",
 				h_synx, rc);
+		/*
+		 * We are decrementing the reference here assuming this code will be
+		 * executed after handle is released. But in case if clients signal
+		 * dma fence in middle of execution sequence, then we will put
+		 * one reference thus deleting the global idx. As of now clients cannot
+		 * signal dma fence.
+		 */
+		synx_global_put_ref(idx);
 	}
 
 	/*
@@ -571,6 +580,7 @@ fail:
 void synx_fence_callback(struct dma_fence *fence,
 	struct dma_fence_cb *cb)
 {
+	s32 status;
 	struct synx_signal_cb *signal_cb =
 		container_of(cb, struct synx_signal_cb, fence_cb);
 
@@ -579,7 +589,19 @@ void synx_fence_callback(struct dma_fence *fence,
 		fence, signal_cb->handle);
 
 	/* other signal_cb members would be set during cb registration */
-	signal_cb->status = dma_fence_get_status_locked(fence);
+	status = dma_fence_get_status_locked(fence);
+
+	/*
+	 * dma_fence_get_status_locked API returns 1 if signaled,
+	 * 0 if ACTIVE,
+	 * and negative error code in case of any failure
+	 */
+	if (status == 1)
+		status = SYNX_STATE_SIGNALED_SUCCESS;
+	else if (status < 0)
+		status = SYNX_STATE_SIGNALED_EXTERNAL;
+
+	signal_cb->status = status;
 
 	INIT_WORK(&signal_cb->cb_dispatch, synx_signal_handler);
 	queue_work(synx_dev->wq_cb, &signal_cb->cb_dispatch);
@@ -728,6 +750,9 @@ int synx_async_wait(struct synx_session *session,
 
 	if (IS_ERR_OR_NULL(session) || IS_ERR_OR_NULL(params))
 		return -SYNX_INVALID;
+
+	if (params->timeout_ms != SYNX_NO_TIMEOUT)
+		return -SYNX_NOSUPPORT;
 
 	client = synx_get_client(session);
 	if (IS_ERR_OR_NULL(client))
@@ -1955,6 +1980,7 @@ static int synx_handle_async_wait(
 	params.h_synx = user_data.synx_obj;
 	params.cb_func = synx_util_default_user_callback;
 	params.userdata = (void *)user_data.payload[0];
+	params.timeout_ms = user_data.payload[2];
 
 	rc = synx_async_wait(session, &params);
 	if (rc)
@@ -2426,8 +2452,8 @@ int synx_ipc_callback(u32 client_id,
 		return -SYNX_NOMEM;
 
 	dprintk(SYNX_DBG,
-		"ipc signal handle %u, status %u, data %llu\n",
-		handle, status, data);
+		"signal notification for %u received with status %u\n",
+		handle, status);
 
 	signal_cb->status = status;
 	signal_cb->handle = handle;
@@ -2485,6 +2511,40 @@ static int synx_local_mem_init(void)
 	return 0;
 }
 
+static int synx_cdsp_restart_notifier(struct notifier_block *nb,
+	unsigned long code, void *data)
+{
+	struct synx_cdsp_ssr *cdsp_ssr = &synx_dev->cdsp_ssr;
+
+	if (&cdsp_ssr->nb != nb) {
+		dprintk(SYNX_ERR, "Invalid SSR Notifier block\n");
+		return NOTIFY_BAD;
+	}
+
+	switch (code) {
+	case QCOM_SSR_BEFORE_SHUTDOWN:
+		break;
+	case QCOM_SSR_AFTER_SHUTDOWN:
+		if (cdsp_ssr->ssrcnt != 0) {
+			dprintk(SYNX_INFO, "Cleaning up global memory\n");
+			synx_global_recover(SYNX_CORE_NSP);
+		}
+		break;
+	case QCOM_SSR_BEFORE_POWERUP:
+		break;
+	case QCOM_SSR_AFTER_POWERUP:
+		dprintk(SYNX_DBG, "CDSP is up");
+		if (cdsp_ssr->ssrcnt == 0)
+			cdsp_ssr->ssrcnt++;
+		break;
+	default:
+		dprintk(SYNX_ERR, "Unknown status code for CDSP SSR\n");
+		break;
+	}
+
+	return NOTIFY_DONE;
+}
+
 static int __init synx_init(void)
 {
 	int rc;
@@ -2536,6 +2596,15 @@ static int __init synx_init(void)
 	rc = synx_global_mem_init();
 	if (rc) {
 		dprintk(SYNX_ERR, "shared mem init failed, err=%d\n", rc);
+		goto err;
+	}
+
+	synx_dev->cdsp_ssr.ssrcnt = 0;
+	synx_dev->cdsp_ssr.nb.notifier_call = synx_cdsp_restart_notifier;
+	synx_dev->cdsp_ssr.handle =
+		qcom_register_ssr_notifier("cdsp", &synx_dev->cdsp_ssr.nb);
+	if (synx_dev->cdsp_ssr.handle == NULL) {
+		dprintk(SYNX_ERR, "SSR registration failed\n");
 		goto err;
 	}
 

@@ -53,6 +53,10 @@
 #include "debug.h"
 #include "power.h"
 #include "genl.h"
+#ifdef OPLUS_FEATURE_WIFI_MAC
+#include <soc/oplus/system/boot_mode.h>
+#include <soc/oplus/system/oplus_project.h>
+#endif /* OPLUS_FEATURE_WIFI_MAC */
 
 #define MAX_PROP_SIZE			32
 #define NUM_LOG_PAGES			10
@@ -85,8 +89,13 @@ module_param(qmi_timeout, ulong, 0600);
 #define WLFW_TIMEOUT                    msecs_to_jiffies(3000)
 #endif
 
+#define ICNSS_RECOVERY_TIMEOUT		60000
+#define ICNSS_WPSS_SSR_TIMEOUT          5000
+#define ICNSS_CAL_TIMEOUT		40000
+
 static struct icnss_priv *penv;
 static struct work_struct wpss_loader;
+static struct work_struct wpss_ssr_work;
 uint64_t dynamic_feature_mask = ICNSS_DEFAULT_FEATURE_MASK;
 
 #define ICNSS_EVENT_PENDING			2989
@@ -104,6 +113,9 @@ uint64_t dynamic_feature_mask = ICNSS_DEFAULT_FEATURE_MASK;
 #define RAMDUMP_NUM_DEVICES		256
 #define ICNSS_RAMDUMP_NAME		"icnss_ramdump"
 
+#define WLAN_EN_TEMP_THRESHOLD		5000
+#define WLAN_EN_DELAY			500
+
 static DEFINE_IDA(rd_minor_id);
 
 enum icnss_pdr_cause_index {
@@ -120,12 +132,17 @@ static const char * const icnss_pdr_cause[] = {
 	[ICNSS_HOST_ERROR] = "Host error",
 };
 
+#ifdef OPLUS_FEATURE_WIFI_DCS_SWITCH
+//Add for: check fw status for switch issue
+static unsigned int cnssprobestate = 0;
+#endif /* OPLUS_FEATURE_WIFI_DCS_SWITCH */
+
 static void icnss_set_plat_priv(struct icnss_priv *priv)
 {
 	penv = priv;
 }
 
-static struct icnss_priv *icnss_get_plat_priv()
+struct icnss_priv *icnss_get_plat_priv(void)
 {
 	return penv;
 }
@@ -493,6 +510,8 @@ static int icnss_send_smp2p(struct icnss_priv *priv,
 					     icnss_smp2p_str[smp2p_entry]);
 				if (!test_bit(ICNSS_FW_DOWN, &priv->state))
 					ICNSS_ASSERT(0);
+				else
+					ret = -ETIMEDOUT;
 			}
 		}
 	}
@@ -518,6 +537,10 @@ static irqreturn_t fw_crash_indication_handler(int irq, void *ctx)
 	struct icnss_uevent_fw_down_data fw_down_data = {0};
 
 	icnss_pr_err("Received early crash indication from FW\n");
+
+	if (priv->wpss_self_recovery_enabled)
+		mod_timer(&priv->wpss_ssr_timer,
+			  jiffies + msecs_to_jiffies(ICNSS_WPSS_SSR_TIMEOUT));
 
 	if (priv) {
 		set_bit(ICNSS_FW_DOWN, &priv->state);
@@ -616,6 +639,33 @@ static void register_early_crash_notifications(struct device *dev)
 	priv->fw_early_crash_irq = irq;
 }
 
+static int icnss_get_temperature(struct icnss_priv *priv, int *temp)
+{
+	struct thermal_zone_device *thermal_dev;
+	const char *tsens;
+	int ret;
+
+	ret = of_property_read_string(priv->pdev->dev.of_node,
+				      "tsens",
+				      &tsens);
+	if (ret)
+		return ret;
+
+	icnss_pr_dbg("Thermal Sensor is %s\n", tsens);
+	thermal_dev = thermal_zone_get_zone_by_name(tsens);
+	if (IS_ERR(thermal_dev)) {
+		icnss_pr_err("Fail to get thermal zone. ret: %d",
+			     PTR_ERR(thermal_dev));
+		return PTR_ERR(thermal_dev);
+	}
+
+	ret = thermal_zone_get_temp(thermal_dev, temp);
+	if (ret)
+		icnss_pr_err("Fail to get temperature. ret: %d", ret);
+
+	return ret;
+}
+
 static irqreturn_t fw_soc_wake_ack_handler(int irq, void *ctx)
 {
 	struct icnss_priv *priv = ctx;
@@ -697,7 +747,11 @@ static int icnss_setup_dms_mac(struct icnss_priv *priv)
 	/* DTSI property use-nv-mac is used to force DMS MAC address for WLAN.
 	 * Thus assert on failure to get MAC from DMS even after retries
 	 */
-	if (priv->use_nv_mac) {
+#ifndef OPLUS_FEATURE_WIFI_MAC
+    if (priv->use_nv_mac) {
+#else
+    if ((get_boot_mode() !=  MSM_BOOT_MODE__WLAN) && priv->use_nv_mac) {
+#endif /* OPLUS_FEATURE_WIFI_MAC */
 		for (i = 0; i < ICNSS_DMS_QMI_CONNECTION_WAIT_RETRY; i++) {
 			if (priv->dms.mac_valid)
 				break;
@@ -749,10 +803,21 @@ retry:
 	icnss_pr_dbg("smem state, Entry: %s", icnss_smp2p_str[smp2p_entry]);
 }
 
+static inline
+void icnss_set_wlan_en_delay(struct icnss_priv *priv)
+{
+	if (priv->wlan_en_delay_ms_user > WLAN_EN_DELAY) {
+		priv->wlan_en_delay_ms = priv->wlan_en_delay_ms_user;
+	} else {
+		priv->wlan_en_delay_ms = WLAN_EN_DELAY;
+	}
+}
+
 static int icnss_driver_event_server_arrive(struct icnss_priv *priv,
 						 void *data)
 {
 	int ret = 0;
+	int temp = 0;
 	bool ignore_assert = false;
 
 	if (!priv)
@@ -786,6 +851,12 @@ static int icnss_driver_event_server_arrive(struct icnss_priv *priv,
 	}
 
 	if (priv->device_id == WCN6750_DEVICE_ID) {
+		if (!icnss_get_temperature(priv, &temp)) {
+			icnss_pr_dbg("Temperature: %d\n", temp);
+			if (temp < WLAN_EN_TEMP_THRESHOLD)
+				icnss_set_wlan_en_delay(priv);
+		}
+
 		ret = wlfw_host_cap_send_sync(priv);
 		if (ret < 0)
 			goto fail;
@@ -811,15 +882,23 @@ static int icnss_driver_event_server_arrive(struct icnss_priv *priv,
 		}
 	}
 
+	if (priv->pon_gpio_control) {
+		ret = icnss_hw_power_on(priv);
+		if (ret)
+			goto fail;
+	}
+
 	ret = wlfw_cap_send_sync_msg(priv);
 	if (ret < 0) {
 		ignore_assert = true;
 		goto fail;
 	}
 
-	ret = icnss_hw_power_on(priv);
-	if (ret)
-		goto fail;
+	if (!priv->pon_gpio_control) {
+		ret = icnss_hw_power_on(priv);
+		if (ret)
+			goto fail;
+	}
 
 	if (priv->device_id == WCN6750_DEVICE_ID) {
 		ret = wlfw_device_info_send_msg(priv);
@@ -865,10 +944,12 @@ static int icnss_driver_event_server_arrive(struct icnss_priv *priv,
 		if (!priv->fw_soc_wake_ack_irq)
 			register_soc_wake_notif(&priv->pdev->dev);
 
-		icnss_get_smp2p_info(priv, ICNSS_SMP2P_OUT_POWER_SAVE);
 		icnss_get_smp2p_info(priv, ICNSS_SMP2P_OUT_SOC_WAKE);
 		icnss_get_smp2p_info(priv, ICNSS_SMP2P_OUT_EP_POWER_SAVE);
 	}
+
+	if (priv->wpss_supported)
+		icnss_get_smp2p_info(priv, ICNSS_SMP2P_OUT_POWER_SAVE);
 
 	if (priv->device_id == ADRASTEA_DEVICE_ID) {
 		if (priv->bdf_download_support) {
@@ -1039,6 +1120,7 @@ static int icnss_driver_event_fw_ready_ind(struct icnss_priv *priv, void *data)
 	if (!priv)
 		return -ENODEV;
 
+	del_timer(&priv->recovery_timer);
 	set_bit(ICNSS_FW_READY, &priv->state);
 	clear_bit(ICNSS_MODE_ON, &priv->state);
 	atomic_set(&priv->soc_wake_ref_count, 0);
@@ -1048,7 +1130,20 @@ static int icnss_driver_event_fw_ready_ind(struct icnss_priv *priv, void *data)
 
 	icnss_pr_info("WLAN FW is ready: 0x%lx\n", priv->state);
 
-	icnss_hw_power_off(priv);
+	if (!priv->pon_gpio_control) {
+		icnss_hw_power_off(priv);
+	} else {
+		/* 1. During normal boot when cold cal is not enabled,
+		 *    fw expects the power to be on at the chip.
+		 * 2. During recovery, fw expects the power to be
+		 *    on at the chip.
+		 * So, turn off only when cold cal is enabled and not in SSR
+		 */
+		if (!test_bit(ICNSS_PD_RESTART, &priv->state) &&
+		    priv->cal_done) {
+			icnss_hw_power_off(priv);
+		}
+	}
 
 	if (!priv->pdev) {
 		icnss_pr_err("Device is not ready\n");
@@ -1082,11 +1177,14 @@ static int icnss_driver_event_fw_init_done(struct icnss_priv *priv, void *data)
 	if (icnss_wlfw_qdss_dnld_send_sync(priv))
 		icnss_pr_info("Failed to download qdss configuration file");
 
-	if (test_bit(ICNSS_COLD_BOOT_CAL, &priv->state))
+	if (test_bit(ICNSS_COLD_BOOT_CAL, &priv->state)) {
+		mod_timer(&priv->recovery_timer,
+			  jiffies + msecs_to_jiffies(ICNSS_CAL_TIMEOUT));
 		ret = wlfw_wlan_mode_send_sync_msg(priv,
 			(enum wlfw_driver_mode_enum_v01)ICNSS_CALIBRATION);
-	else
+	} else {
 		icnss_driver_event_fw_ready_ind(priv, NULL);
+	}
 
 	return ret;
 }
@@ -1472,12 +1570,14 @@ static int icnss_driver_event_pd_service_down(struct icnss_priv *priv,
 
 	if (priv->device_id == WCN6750_DEVICE_ID) {
 		icnss_send_smp2p(priv, ICNSS_RESET_MSG,
-				 ICNSS_SMP2P_OUT_POWER_SAVE);
-		icnss_send_smp2p(priv, ICNSS_RESET_MSG,
 				 ICNSS_SMP2P_OUT_SOC_WAKE);
 		icnss_send_smp2p(priv, ICNSS_RESET_MSG,
 				 ICNSS_SMP2P_OUT_EP_POWER_SAVE);
 	}
+
+	if (priv->wpss_supported)
+		icnss_send_smp2p(priv, ICNSS_RESET_MSG,
+				 ICNSS_SMP2P_OUT_POWER_SAVE);
 
 	icnss_send_hang_event_data(priv);
 
@@ -1665,6 +1765,19 @@ static int icnss_subsys_restart_level(struct icnss_priv *priv, void *data)
 	kfree(data);
 
 	return ret;
+}
+
+static void icnss_wpss_self_recovery(struct work_struct *wpss_load_work)
+{
+	int ret;
+	struct icnss_priv *priv = icnss_get_plat_priv();
+
+	rproc_shutdown(priv->rproc);
+	ret = rproc_boot(priv->rproc);
+	if (ret) {
+		icnss_pr_err("Failed to self recover wpss rproc, ret: %d", ret);
+		rproc_put(priv->rproc);
+	}
 }
 
 static void icnss_driver_event_work(struct work_struct *work)
@@ -1971,6 +2084,9 @@ static int icnss_wpss_notifier_nb(struct notifier_block *nb,
 	if (code != QCOM_SSR_BEFORE_SHUTDOWN)
 		goto out;
 
+	if (priv->wpss_self_recovery_enabled)
+		del_timer(&priv->wpss_ssr_timer);
+
 	priv->is_ssr = true;
 
 	icnss_pr_info("WPSS went down, state: 0x%lx, crashed: %d\n",
@@ -2002,6 +2118,10 @@ static int icnss_wpss_notifier_nb(struct notifier_block *nb,
 	}
 	icnss_driver_event_post(priv, ICNSS_DRIVER_EVENT_PD_SERVICE_DOWN,
 				ICNSS_EVENT_SYNC, event_data);
+
+	if (notif->crashed)
+		mod_timer(&priv->recovery_timer,
+			  jiffies + msecs_to_jiffies(ICNSS_RECOVERY_TIMEOUT));
 out:
 	icnss_pr_vdbg("Exit %s,state: 0x%lx\n", __func__, priv->state);
 	return NOTIFY_OK;
@@ -2079,6 +2199,10 @@ static int icnss_modem_notifier_nb(struct notifier_block *nb,
 	}
 	icnss_driver_event_post(priv, ICNSS_DRIVER_EVENT_PD_SERVICE_DOWN,
 				ICNSS_EVENT_SYNC, event_data);
+
+	if (notif->crashed)
+		mod_timer(&priv->recovery_timer,
+			  jiffies + msecs_to_jiffies(ICNSS_RECOVERY_TIMEOUT));
 out:
 	icnss_pr_vdbg("Exit %s,state: 0x%lx\n", __func__, priv->state);
 	return NOTIFY_OK;
@@ -2233,6 +2357,11 @@ static void icnss_pdr_notifier_cb(int state, char *service_path, void *priv_cb)
 			}
 		}
 		clear_bit(ICNSS_HOST_TRIGGERED_PDR, &priv->state);
+		if (event_data->crashed)
+			mod_timer(&priv->recovery_timer,
+				  jiffies +
+				  msecs_to_jiffies(ICNSS_RECOVERY_TIMEOUT));
+
 		icnss_driver_event_post(priv, ICNSS_DRIVER_EVENT_PD_SERVICE_DOWN,
 					ICNSS_EVENT_SYNC, event_data);
 		break;
@@ -2508,6 +2637,14 @@ static int icnss_tcdev_set_cur_state(struct thermal_cooling_device *tcdev,
 
 	icnss_pr_vdbg("Cooling device set current state: %ld,for cdev id %d",
 		      thermal_state, icnss_tcdev->tcdev_id);
+
+	/* If wlan is not on, do not report therm state */
+	if (penv->pon_gpio_control) {
+		if ((penv->pon_pinctrl_owners &
+		    BIT(ICNSS_PINCTRL_OWNER_WLAN)) == 0) {
+			return 0;
+		}
+	}
 
 	mutex_lock(&penv->tcdev_lock);
 	ret = penv->ops->set_therm_cdev_state(dev, thermal_state,
@@ -2952,6 +3089,8 @@ int icnss_get_soc_info(struct device *dev, struct icnss_soc_info *info)
 	strlcpy(info->fw_build_timestamp,
 		priv->fw_version_info.fw_build_timestamp,
 		WLFW_MAX_TIMESTAMP_LEN + 1);
+	strlcpy(info->fw_build_id, priv->fw_build_id,
+		ICNSS_WLFW_MAX_BUILD_ID_LEN + 1);
 
 	return 0;
 }
@@ -3170,6 +3309,7 @@ int icnss_wlan_enable(struct device *dev, struct icnss_wlan_enable_cfg *config,
 		      const char *host_version)
 {
 	struct icnss_priv *priv = dev_get_drvdata(dev);
+	int temp = 0;
 
 	if (test_bit(ICNSS_FW_DOWN, &priv->state) ||
 	    !test_bit(ICNSS_FW_READY, &priv->state)) {
@@ -3187,6 +3327,14 @@ int icnss_wlan_enable(struct device *dev, struct icnss_wlan_enable_cfg *config,
 	if (priv->wpss_supported &&
 	    !priv->dms.nv_mac_not_prov && !priv->dms.mac_valid)
 		icnss_setup_dms_mac(priv);
+
+	if (priv->device_id == WCN6750_DEVICE_ID) {
+		if (!icnss_get_temperature(priv, &temp)) {
+			icnss_pr_dbg("Temperature: %d\n", temp);
+			if (temp < WLAN_EN_TEMP_THRESHOLD)
+				icnss_set_wlan_en_delay(priv);
+		}
+	}
 
 	return icnss_send_wlan_enable_to_fw(priv, config, mode, host_version);
 }
@@ -3386,7 +3534,7 @@ int icnss_trigger_recovery(struct device *dev)
 		goto out;
 	}
 
-	if (priv->device_id == WCN6750_DEVICE_ID) {
+	if (priv->wpss_supported) {
 		icnss_pr_vdbg("Initiate Root PD restart");
 		ret = icnss_send_smp2p(priv, ICNSS_TRIGGER_SSR,
 				       ICNSS_SMP2P_OUT_POWER_SAVE);
@@ -3674,7 +3822,7 @@ static ssize_t wlan_en_delay_store(struct device *dev,
 	}
 
 	icnss_pr_dbg("WLAN_EN delay: %dms", wlan_en_delay);
-	priv->wlan_en_delay_ms = wlan_en_delay;
+	priv->wlan_en_delay_ms_user = wlan_en_delay;
 
 	return count;
 }
@@ -4108,6 +4256,13 @@ void icnss_add_fw_prefix_name(struct icnss_priv *priv, char *prefix_name,
 		scnprintf(prefix_name, ICNSS_MAX_FILE_NAME,
 			  QCA6750_PATH_PREFIX "%s", name);
 
+#ifdef OPLUS_FEATURE_WIFI_BDF
+    scnprintf(prefix_name, ICNSS_MAX_FILE_NAME, "%s", name);
+#else
+    scnprintf(prefix_name, ICNSS_MAX_FILE_NAME,
+          QCA6750_PATH_PREFIX "%s", name);
+#endif /* OPLUS_FEATURE_WIFI_BDF */
+
 	icnss_pr_dbg("File added with prefix: %s\n", prefix_name);
 }
 
@@ -4154,6 +4309,10 @@ static void icnss_read_device_configs(struct icnss_priv *priv)
 				  "wlan-ipa-disabled")) {
 		set_bit(ICNSS_IPA_DISABLED, &priv->device_config);
 	}
+
+	if (of_property_read_bool(priv->pdev->dev.of_node,
+				  "qcom,wpss-self-recovery"))
+		priv->wpss_self_recovery_enabled = true;
 }
 
 static inline void icnss_runtime_pm_init(struct icnss_priv *priv)
@@ -4170,6 +4329,41 @@ static inline void icnss_runtime_pm_deinit(struct icnss_priv *priv)
 	pm_runtime_allow(&priv->pdev->dev);
 	pm_runtime_put_sync(&priv->pdev->dev);
 }
+
+#ifdef OPLUS_FEATURE_WIFI_DCS_SWITCH
+//Add for: check fw status for switch issue
+static void icnss_create_fw_state_kobj(void);
+static ssize_t icnss_show_fw_ready(struct device_driver *driver, char *buf)
+{
+	bool firmware_ready = false;
+	bool bdfloadsuccess = false;
+	bool regdbloadsuccess = false;
+	bool cnssprobesuccess = false;
+	if (!penv) {
+           icnss_pr_err("icnss_show_fw_ready plat_env is NULL!\n");
+	} else {
+           firmware_ready = test_bit(ICNSS_FW_READY, &penv->state);
+           regdbloadsuccess = test_bit(CNSS_LOAD_REGDB_SUCCESS, &penv->loadRegdbState);
+           bdfloadsuccess = test_bit(CNSS_LOAD_BDF_SUCCESS, &penv->loadBdfState);
+	}
+	cnssprobesuccess = (cnssprobestate == CNSS_PROBE_SUCCESS);
+	return sprintf(buf, "%s:%s:%s:%s",
+           (firmware_ready ? "fwstatus_ready" : "fwstatus_not_ready"),
+           (regdbloadsuccess ? "regdb_loadsuccess" : "regdb_loadfail"),
+           (bdfloadsuccess ? "bdf_loadsuccess" : "bdf_loadfail"),
+           (cnssprobesuccess ? "cnssprobe_success" : "cnssprobe_fail")
+           );
+}
+
+struct driver_attribute icnss_fw_ready_attr = {
+	.attr = {
+		.name = "firmware_ready",
+		.mode = S_IRUGO,
+	},
+	.show = icnss_show_fw_ready,
+	//read only so we don't need to impl store func
+};
+#endif /* OPLUS_FEATURE_WIFI_DCS_SWITCH */
 
 static inline bool icnss_use_nv_mac(struct icnss_priv *priv)
 {
@@ -4241,6 +4435,11 @@ static int icnss_probe(struct platform_device *pdev)
 
 	icnss_read_device_configs(priv);
 
+#ifdef OPLUS_FEATURE_WIFI_DCS_SWITCH
+	//Add for: check fw status for switch issue
+	icnss_create_fw_state_kobj();
+#endif /* OPLUS_FEATURE_WIFI_DCS_SWITCH */
+
 	ret = icnss_resource_parse(priv);
 	if (ret)
 		goto out_reset_drvdata;
@@ -4252,6 +4451,11 @@ static int icnss_probe(struct platform_device *pdev)
 	ret = icnss_smmu_dt_parse(priv);
 	if (ret)
 		goto out_free_resources;
+
+	if (of_property_read_bool(priv->pdev->dev.of_node,
+				  "qcom,pon-gpio-control")) {
+		priv->pon_gpio_control = true;
+	}
 
 	spin_lock_init(&priv->event_lock);
 	spin_lock_init(&priv->on_off_lock);
@@ -4324,7 +4528,30 @@ static int icnss_probe(struct platform_device *pdev)
 		INIT_WORK(&wpss_loader, icnss_wpss_load);
 	}
 
+	timer_setup(&priv->recovery_timer,
+		    icnss_recovery_timeout_hdlr, 0);
+
+	if (priv->wpss_self_recovery_enabled) {
+		INIT_WORK(&wpss_ssr_work, icnss_wpss_self_recovery);
+		timer_setup(&priv->wpss_ssr_timer,
+			    icnss_wpss_ssr_timeout_hdlr, 0);
+	}
+
 	INIT_LIST_HEAD(&priv->icnss_tcdev_list);
+
+
+	if (priv->pon_gpio_control) {
+		ret = icnss_get_pinctrl(priv);
+		if (ret < 0) {
+			icnss_pr_err("Fail to get pinctrl config from dt\n");
+			goto out_unregister_fw_service;
+		}
+	}
+
+#ifdef OPLUS_FEATURE_WIFI_DCS_SWITCH
+	//Add for: check fw status for switch issue
+	cnssprobestate = CNSS_PROBE_SUCCESS;
+#endif /* OPLUS_FEATURE_WIFI_DCS_SWITCH */
 
 	icnss_pr_info("Platform driver probed successfully\n");
 
@@ -4340,6 +4567,11 @@ out_free_resources:
 	icnss_put_resources(priv);
 out_reset_drvdata:
 	dev_set_drvdata(dev, NULL);
+#ifdef OPLUS_FEATURE_WIFI_DCS_SWITCH
+    //Add for: check fw status for switch issue
+    cnssprobestate = CNSS_PROBE_FAIL;
+#endif /* OPLUS_FEATURE_WIFI_DCS_SWITCH */
+
 	return ret;
 }
 
@@ -4361,6 +4593,11 @@ static int icnss_remove(struct platform_device *pdev)
 	struct icnss_priv *priv = dev_get_drvdata(&pdev->dev);
 
 	icnss_pr_info("Removing driver: state: 0x%lx\n", priv->state);
+
+	del_timer(&priv->recovery_timer);
+
+	if (priv->wpss_self_recovery_enabled)
+		del_timer(&priv->wpss_ssr_timer);
 
 	device_init_wakeup(&priv->pdev->dev, false);
 
@@ -4413,6 +4650,23 @@ static int icnss_remove(struct platform_device *pdev)
 	dev_set_drvdata(&pdev->dev, NULL);
 
 	return 0;
+}
+
+void icnss_recovery_timeout_hdlr(struct timer_list *t)
+{
+	struct icnss_priv *priv = from_timer(priv, t, recovery_timer);
+
+	icnss_pr_err("Timeout waiting for FW Ready 0x%lx\n", priv->state);
+	ICNSS_ASSERT(0);
+}
+
+void icnss_wpss_ssr_timeout_hdlr(struct timer_list *t)
+{
+	struct icnss_priv *priv = from_timer(priv, t, wpss_ssr_timer);
+
+	icnss_pr_err("Timeout waiting for WPSS SSR notification 0x%lx\n",
+		      priv->state);
+	schedule_work(&wpss_ssr_work);
 }
 
 #ifdef CONFIG_PM_SLEEP
@@ -4639,6 +4893,15 @@ static struct platform_driver icnss_driver = {
 		.of_match_table = icnss_dt_match,
 	},
 };
+
+#ifdef OPLUS_FEATURE_WIFI_DCS_SWITCH
+//Add for: check fw status for switch issue
+static void icnss_create_fw_state_kobj(void) {
+	if (driver_create_file(&(icnss_driver.driver), &icnss_fw_ready_attr)) {
+		icnss_pr_info("failed to create %s", icnss_fw_ready_attr.attr.name);
+	}
+}
+#endif /* OPLUS_FEATURE_WIFI_DCS_SWITCH */
 
 static int __init icnss_initialize(void)
 {

@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (c) 2010-2021, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #ifndef __KGSL_PWRSCALE_H
@@ -107,4 +108,6 @@ void msm_adreno_tz_exit(void);
 int devfreq_gpubw_init(void);
 
 void devfreq_gpubw_exit(void);
+
+void kgsl_pwrscale_fast_bus_hint(bool on);
 #endif

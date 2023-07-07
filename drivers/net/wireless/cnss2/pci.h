@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (c) 2016-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2021 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2021-2022 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #ifndef _CNSS_PCI_H
@@ -57,6 +57,7 @@ enum cnss_pci_reg_dev_mask {
 	REG_MASK_QCA6390,
 	REG_MASK_QCA6490,
 	REG_MASK_KIWI,
+	REG_MASK_MANGO,
 };
 
 struct cnss_msi_user {
@@ -155,6 +156,7 @@ struct cnss_pci_data {
 	unsigned long misc_reg_dev_mask;
 	u8 iommu_geometry;
 	bool drv_supported;
+	bool is_smmu_fault;
 };
 
 static inline void cnss_set_pci_priv(struct pci_dev *pci_dev, void *data)
@@ -280,4 +282,5 @@ int cnss_pci_update_time_sync_period(struct cnss_pci_data *pci_priv,
 				     unsigned int time_sync_period);
 void cnss_pci_handle_linkdown(struct cnss_pci_data *pci_priv);
 
+bool cnss_pci_is_smmu_s1_enabled(struct cnss_pci_data *pci_priv);
 #endif /* _CNSS_PCI_H */

@@ -19,10 +19,20 @@ struct usb_repeater  {
 	struct list_head	head;
 	int	(*reset)(struct usb_repeater *x, bool bring_out_of_reset);
 	int	(*init)(struct usb_repeater *x);
+#ifdef OPLUS_FEATURE_CHG_BASIC
+	int	(*init_with_mode)(struct usb_repeater *x, int mode);
+#endif
 	int	(*suspend)(struct usb_repeater *r, int suspend);
 	int	(*powerup)(struct usb_repeater *r);
 	int	(*powerdown)(struct usb_repeater *r);
 };
+
+#ifdef OPLUS_FEATURE_CHG_BASIC
+enum oplus_usb_repeater_param {
+    OPLUS_REPEATER_PARAM_DEVICE,
+    OPLUS_REPEATER_PARAM_HOST
+};
+#endif
 
 #if IS_ENABLED(CONFIG_USB_REPEATER)
 struct usb_repeater *devm_usb_get_repeater_by_phandle(struct device *dev,
@@ -67,6 +77,16 @@ static inline int usb_repeater_init(struct usb_repeater *r)
 	else
 		return 0;
 }
+
+#ifdef OPLUS_FEATURE_CHG_BASIC
+static inline int usb_repeater_init_with_mode(struct usb_repeater *r, int param)
+{
+	if (r && r->init_with_mode != NULL)
+		return r->init_with_mode(r, param);
+	else
+		return 0;
+}
+#endif
 
 static inline int usb_repeater_suspend(struct usb_repeater *r, int suspend)
 {

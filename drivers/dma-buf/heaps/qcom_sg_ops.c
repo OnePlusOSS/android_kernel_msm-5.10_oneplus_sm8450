@@ -509,6 +509,17 @@ static void qcom_sg_release(struct dma_buf *dmabuf)
 		return;
 
 	msm_dma_buf_freed(buffer);
+
+#ifdef CONFIG_QCOM_DMABUF_HEAPS_SYSTEM
+	if (is_system_heap_deferred_free(buffer->free)) {
+		if (atomic64_sub_return(buffer->len, &qcom_system_heap_total) < 0) {
+			pr_info("warn: %s, total memory underflow, 0x%lx!!, reset as 0\n",
+				__func__, atomic64_read(&qcom_system_heap_total));
+			atomic64_set(&qcom_system_heap_total, 0);
+		}
+	}
+#endif /* CONFIG_QCOM_DMABUF_HEAPS_SYSTEM */
+
 	buffer->free(buffer);
 }
 
@@ -519,9 +530,17 @@ static struct mem_buf_vmperm *qcom_sg_lookup_vmperm(struct dma_buf *dmabuf)
 	return buffer->vmperm;
 }
 
+static bool qcom_sg_uncached(struct dma_buf *dmabuf)
+{
+	struct qcom_sg_buffer *buffer = dmabuf->priv;
+
+	return buffer->uncached;
+}
+
 struct mem_buf_dma_buf_ops qcom_sg_buf_ops = {
 	.attach = qcom_sg_attach,
 	.lookup = qcom_sg_lookup_vmperm,
+	.uncached = qcom_sg_uncached,
 	.dma_ops = {
 		.attach = NULL, /* Will be set by mem_buf_dma_buf_export */
 		.detach = qcom_sg_detach,

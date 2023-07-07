@@ -522,6 +522,7 @@ struct cnss_plat_data {
 	u8 set_wlaon_pwr_ctrl;
 	struct cnss_tcs_info tcs_info;
 	bool fw_pcie_gen_switch;
+	u64 fw_caps;
 	u8 pcie_gen_speed;
 	struct cnss_dms_data dms;
 	int power_up_error;
@@ -540,7 +541,25 @@ struct cnss_plat_data {
 	u32 hang_data_addr_offset;
 	/* bitmap to detect FEM combination */
 	u8 hwid_bitmap;
+#ifdef OPLUS_FEATURE_WIFI_DCS_SWITCH
+	unsigned long loadBdfState;
+	unsigned long loadRegdbState;
+#endif /* OPLUS_FEATURE_WIFI_DCS_SWITCH */
+	enum cnss_driver_mode driver_mode;
+	u32 num_shadow_regs_v3;
 };
+
+#ifdef OPLUS_FEATURE_WIFI_DCS_SWITCH
+enum cnss_load_state {
+	CNSS_LOAD_BDF_FAIL = 1,
+	CNSS_LOAD_BDF_SUCCESS,
+	CNSS_LOAD_REGDB_FAIL,
+	CNSS_LOAD_REGDB_SUCCESS,
+	CNSS_PROBE_FAIL,
+	CNSS_PROBE_SUCCESS,
+};
+
+#endif /* OPLUS_FEATURE_WIFI_DCS_SWITCH */
 
 #if IS_ENABLED(CONFIG_ARCH_QCOM)
 static inline u64 cnss_get_host_timestamp(struct cnss_plat_data *plat_priv)

@@ -2,6 +2,7 @@
 /*
  * Copyright (c) 2015, Sony Mobile Communications Inc.
  * Copyright (c) 2013, 2018-2019 The Linux Foundation. All rights reserved.
+ * Copyright (c) 2022, Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <linux/module.h>
@@ -67,7 +68,9 @@ out:
 
 static int qcom_smd_qrtr_probe(struct rpmsg_device *rpdev)
 {
+	struct qrtr_array svc_arr = {NULL, 0};
 	struct qrtr_smd_dev *qdev;
+	int size;
 	u32 net_id;
 	bool rt;
 	int rc;
@@ -79,6 +82,9 @@ static int qcom_smd_qrtr_probe(struct rpmsg_device *rpdev)
 
 	qdev->channel = rpdev->ept;
 	qdev->dev = &rpdev->dev;
+	#ifdef CONFIG_OPLUS_POWERINFO_STANDBY_DEBUG
+	qdev->ep.dev = &rpdev->dev;
+	#endif
 	qdev->ep.xmit = qcom_smd_qrtr_send;
 
 	rc = of_property_read_u32(rpdev->dev.of_node, "qcom,net-id", &net_id);
@@ -87,9 +93,23 @@ static int qcom_smd_qrtr_probe(struct rpmsg_device *rpdev)
 
 	rt = of_property_read_bool(rpdev->dev.of_node, "qcom,low-latency");
 
-	rc = qrtr_endpoint_register(&qdev->ep, net_id, rt);
-	if (rc)
+	size = of_property_count_u32_elems(rpdev->dev.of_node, "qcom,no-wake-svc");
+	if (size > 0) {
+		svc_arr.size = size;
+		svc_arr.arr = kmalloc_array(size, sizeof(u32), GFP_KERNEL);
+		if (!svc_arr.arr)
+			return -ENOMEM;
+
+		of_property_read_u32_array(rpdev->dev.of_node, "qcom,no-wake-svc",
+					   svc_arr.arr, size);
+	}
+
+	rc = qrtr_endpoint_register(&qdev->ep, net_id, rt, &svc_arr);
+	kfree(svc_arr.arr);
+	if (rc) {
+		dev_err(qdev->dev, "endpoint register failed: %d\n", rc, rt);
 		return rc;
+	}
 
 	dev_set_drvdata(&rpdev->dev, qdev);
 

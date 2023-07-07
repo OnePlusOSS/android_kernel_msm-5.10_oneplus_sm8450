@@ -1185,7 +1185,7 @@ int mhi_queue_skb(struct mhi_device *mhi_dev, enum dma_data_direction dir,
 		return -EINVAL;
 
 	if (mhi_is_ring_full(mhi_cntrl, tre_ring))
-		return -ENOMEM;
+		return -EAGAIN;
 
 	read_lock_bh(&mhi_cntrl->pm_lock);
 	if (unlikely(MHI_PM_IN_ERROR_STATE(mhi_cntrl->pm_state))) {

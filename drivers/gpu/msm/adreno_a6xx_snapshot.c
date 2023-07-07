@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2017-2021, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <linux/iopoll.h>
@@ -313,6 +314,13 @@ static const unsigned int a6xx_pre_crashdumper_registers[] = {
 };
 
 static const unsigned int a6xx_gmu_wrapper_registers[] = {
+	/* GMU CX */
+	0x1f840, 0x1f840, 0x1f844, 0x1f845, 0x1f887, 0x1f889, 0x1f8d0, 0x1f8d0,
+	/* GMU AO*/
+	0x23b0C, 0x23b0E, 0x23b15, 0x23b15,
+};
+
+static const unsigned int a6xx_holi_gmu_wrapper_registers[] = {
 	/* GMU SPTPRAC */
 	0x1a880, 0x1a881,
 	/* GMU CX */
@@ -678,6 +686,16 @@ static size_t a6xx_legacy_snapshot_shader(struct kgsl_device *device,
 		SNAPSHOT_ERR_NOMEM(device, "SHADER MEMORY");
 		return 0;
 	}
+
+	/*
+	 * If crashdumper times out, accessing some readback states from
+	 * AHB path might fail. Hence, skip SP_INST_TAG and SP_INST_DATA
+	 * state types during snapshot dump in legacy flow.
+	 */
+	if (adreno_is_a660(ADRENO_DEVICE(device)) &&
+		(block->statetype == A6XX_SP_INST_TAG ||
+		 block->statetype == A6XX_SP_INST_DATA))
+		return 0;
 
 	header->type = block->statetype;
 	header->index = info->bank;
@@ -1754,9 +1772,14 @@ void a6xx_snapshot(struct adreno_device *adreno_dev,
 	}
 
 	if (!gmu_core_isenabled(device)) {
-		adreno_snapshot_registers(device, snapshot,
-				a6xx_gmu_wrapper_registers,
-				ARRAY_SIZE(a6xx_gmu_wrapper_registers) / 2);
+		if (adreno_is_a619_holi(adreno_dev))
+			adreno_snapshot_registers(device, snapshot,
+					a6xx_holi_gmu_wrapper_registers,
+					ARRAY_SIZE(a6xx_holi_gmu_wrapper_registers) / 2);
+		else
+			adreno_snapshot_registers(device, snapshot,
+					a6xx_gmu_wrapper_registers,
+					ARRAY_SIZE(a6xx_gmu_wrapper_registers) / 2);
 	}
 
 	sptprac_on = a6xx_gmu_sptprac_is_on(adreno_dev);

@@ -17,9 +17,13 @@
 #define PIPE_BV 2
 #define PIPE_LPAC 3
 
+/* Forward struct declaration */
+struct gen7_snapshot_block_list;
+
 extern const struct adreno_power_ops gen7_gmu_power_ops;
 extern const struct adreno_power_ops gen7_hwsched_power_ops;
 extern const struct adreno_perfcounters adreno_gen7_perfcounters;
+extern const struct adreno_perfcounters adreno_gen7_6_0_perfcounters;
 
 struct gen7_gpudev {
 	struct adreno_gpudev base;
@@ -67,6 +71,8 @@ struct gen7_protected_regs {
 struct adreno_gen7_core {
 	/** @base: Container for the generic GPU definitions */
 	struct adreno_gpu_core base;
+	/** @gmu_fw_version: Minimum firmware version required to support this core */
+	u32 gmu_fw_version;
 	/** @sqefw_name: Name of the SQE microcode file */
 	const char *sqefw_name;
 	/** @gmufw_name: Name of the GMU firmware file */
@@ -93,6 +99,24 @@ struct adreno_gen7_core {
 	u32 highest_bank_bit;
 	/** @gmu_hub_clk_freq: Gmu hub interface clock frequency */
 	u64 gmu_hub_clk_freq;
+	/** @gen7_snapshot_block_list: Device-specific blocks dumped in the snapshot */
+	const struct gen7_snapshot_block_list *gen7_snapshot_block_list;
+	/**
+	 * @bcl_data: BCL data is expected by gmu in below format.
+	 * Bit 0 contains response type for bcl alarms and bits 1:21 controls sid val
+	 * to configure throttle levels for bcl alarm levels 0-2. If sid vals are not set,
+	 * gmu fw sets default throttle levels.
+	 *
+	 * BIT[0]     - Response type
+	 * BIT[1:7]   - Throttle level 1 (optional)
+	 * BIT[8:14]  - Throttle level 2 (optional)
+	 * BIT[15:21] - Throttle level 3 (optional)
+	 */
+	u32 bcl_data;
+	/** @fast_bus_hint: Whether or not to increase IB vote on high ddr stall */
+	bool fast_bus_hint;
+	/** @qos_value: GPU qos value to set for each RB. */
+	const u32 *qos_value;
 };
 
 /**
@@ -239,9 +263,21 @@ int gen7_preemption_context_init(struct kgsl_context *context);
 
 void gen7_preemption_context_destroy(struct kgsl_context *context);
 
+void gen7_preemption_prepare_postamble(struct adreno_device *adreno_dev);
+
 void gen7_snapshot(struct adreno_device *adreno_dev,
 		struct kgsl_snapshot *snapshot);
 void gen7_crashdump_init(struct adreno_device *adreno_dev);
+
+/**
+ * gen7_snapshot_external_core_regs - Dump external registers into snapshot
+ * @device: Pointer to KGSL device
+ * @snapshot: Pointer to the snapshot
+ *
+ * Dump external core registers like GPUCC, CPR into GPU snapshot.
+ */
+void gen7_snapshot_external_core_regs(struct kgsl_device *device,
+		struct kgsl_snapshot *snapshot);
 
 /**
  * gen7_read_alwayson - Read the current always on clock value

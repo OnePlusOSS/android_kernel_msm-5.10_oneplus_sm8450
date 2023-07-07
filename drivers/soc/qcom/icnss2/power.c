@@ -53,6 +53,12 @@ static struct icnss_clk_cfg icnss_adrestea_clk_list[] = {
 #define ICNSS_MBOX_MSG_MAX_LEN 64
 #define ICNSS_MBOX_TIMEOUT_MS 1000
 
+#define WLAN_PON_EN			"wlan_pon_en"
+#define WLAN_PON_DIS			"wlan_pon_dis"
+#define WLAN_POFF_EN			"wlan_poff_en"
+#define WLAN_POFF_DIS			"wlan_poff_dis"
+#define WLAN_PON_DELAY			20
+
 /**
  * enum icnss_vreg_param: Voltage regulator TCS param
  * @ICNSS_VREG_VOLTAGE: Provides voltage level to be configured in TCS
@@ -147,10 +153,7 @@ static int icnss_get_vreg_single(struct icnss_priv *priv,
 			vreg->cfg.delay_us = be32_to_cpup(&prop[3]);
 			break;
 		case 4:
-			if (priv->device_id == WCN6750_DEVICE_ID)
-				vreg->cfg.need_unvote = be32_to_cpup(&prop[4]);
-			else
-				vreg->cfg.need_unvote = 0;
+			vreg->cfg.need_unvote = be32_to_cpup(&prop[4]);
 			break;
 		default:
 			icnss_pr_dbg("Property %s, ignoring value at %d\n",
@@ -640,7 +643,26 @@ int icnss_hw_power_on(struct icnss_priv *priv)
 	if (ret)
 		goto vreg_off;
 
+	if (priv->pon_gpio_control) {
+		/* Better to power off and then power on, to rule
+		 * out state mismatch between WPSS and wlan chip
+		 */
+		icnss_power_trigger_pinctrl(&priv->pdev->dev,
+					    ICNSS_PINCTRL_OWNER_WLAN,
+					    ICNSS_PINCTRL_SEQ_OFF);
+		ret = icnss_power_trigger_pinctrl(&priv->pdev->dev,
+						  ICNSS_PINCTRL_OWNER_WLAN,
+						  ICNSS_PINCTRL_SEQ_ON);
+		if (ret) {
+			icnss_pr_err("Failed to select pinctrl state, err = %d\n", ret);
+			goto clk_off;
+		}
+	}
+
 	return ret;
+
+clk_off:
+	icnss_clk_off(&priv->clk_list);
 
 vreg_off:
 	icnss_vreg_off(priv);
@@ -672,6 +694,11 @@ int icnss_hw_power_off(struct icnss_priv *priv)
 	icnss_clk_off(&priv->clk_list);
 
 	ret = icnss_vreg_off(priv);
+
+	if (priv->pon_gpio_control)
+		ret = icnss_power_trigger_pinctrl(&priv->pdev->dev,
+						  ICNSS_PINCTRL_OWNER_WLAN,
+						  ICNSS_PINCTRL_SEQ_OFF);
 
 	return ret;
 }
@@ -940,3 +967,236 @@ int icnss_update_cpr_info(struct icnss_priv *priv)
 				       ICNSS_TCS_UP_SEQ,
 				       cpr_info->voltage);
 }
+
+static int icnss_power_pinctrl_set(struct icnss_priv *priv,
+				   enum icnss_pinctrl_owner owner,
+				   enum icnss_pinctrl_seq seq)
+{
+	int ret = 0;
+	struct icnss_pinctrl_info *pinctrl_info;
+
+	if (!priv) {
+		icnss_pr_pon_seq("plat_priv is NULL!\n");
+		ret = -ENODEV;
+		goto out;
+	}
+
+	pinctrl_info = &priv->pinctrl_info;
+	icnss_pr_pon_seq("icnss: pinctrl seq %u\n", seq);
+
+	switch (seq) {
+	case ICNSS_PINCTRL_SEQ_OFF:
+		if (!IS_ERR_OR_NULL(pinctrl_info->wlan_poff_en)) {
+			ret = pinctrl_select_state(pinctrl_info->pinctrl,
+						   pinctrl_info->wlan_poff_en);
+			if (ret) {
+				icnss_pr_pon_seq("state for poff_en err=%d\n",
+						 ret);
+				goto out;
+			}
+		} else {
+			ret = -ENODEV;
+			goto out;
+		}
+		mdelay(WLAN_PON_DELAY);
+		if (!IS_ERR_OR_NULL(pinctrl_info->wlan_poff_dis)) {
+			ret = pinctrl_select_state(pinctrl_info->pinctrl,
+						   pinctrl_info->wlan_poff_dis);
+			if (ret) {
+				icnss_pr_pon_seq("state for poff_dis err=%d\n",
+						 ret);
+				goto out;
+			}
+			priv->pon_pinctrl_owners &= ~BIT(owner);
+			priv->pof_pinctrl_owners |= BIT(owner);
+		} else {
+			ret = -ENODEV;
+			goto out;
+		}
+		break;
+	case ICNSS_PINCTRL_SEQ_ON:
+		if (!IS_ERR_OR_NULL(pinctrl_info->wlan_pon_en)) {
+			ret = pinctrl_select_state(pinctrl_info->pinctrl,
+						   pinctrl_info->wlan_pon_en);
+			if (ret) {
+				icnss_pr_pon_seq("state for pon_en, err=%d\n",
+						 ret);
+				goto out;
+			}
+		} else {
+			ret = -ENODEV;
+			goto out;
+		}
+		mdelay(WLAN_PON_DELAY);
+		if (!IS_ERR_OR_NULL(pinctrl_info->wlan_pon_dis)) {
+			ret = pinctrl_select_state(pinctrl_info->pinctrl,
+						   pinctrl_info->wlan_pon_dis);
+			if (ret) {
+				icnss_pr_pon_seq("state for wlan_pon_dis err=%d\n",
+						 ret);
+				goto out;
+			}
+			priv->pon_pinctrl_owners |= BIT(owner);
+			priv->pof_pinctrl_owners &= ~BIT(owner);
+		} else {
+			ret = -ENODEV;
+			goto out;
+		}
+		break;
+	default:
+		icnss_pr_pon_seq("Unhandled pinctrl power sequence %u\n", seq);
+		ret = -EINVAL;
+		break;
+	}
+out:
+	return ret;
+}
+
+int icnss_get_pinctrl(struct icnss_priv *priv)
+{
+	struct icnss_pinctrl_info *pinctrl_info;
+	struct device *dev;
+	int ret = 0;
+
+	if (!priv)
+		return -EINVAL;
+
+	/* Init to - no power ons, and all are powered down */
+	dev = &priv->pdev->dev;
+	pinctrl_info = &priv->pinctrl_info;
+
+	pinctrl_info->pinctrl = devm_pinctrl_get(dev);
+	if (IS_ERR_OR_NULL(pinctrl_info->pinctrl)) {
+		ret = PTR_ERR(pinctrl_info->pinctrl);
+		icnss_pr_pon_seq("Failed to get pinctrl, err = %d\n", ret);
+		goto out;
+	}
+
+	pinctrl_info->wlan_pon_en =
+		pinctrl_lookup_state(pinctrl_info->pinctrl,
+				     WLAN_PON_EN);
+	if (IS_ERR_OR_NULL(pinctrl_info->wlan_pon_en)) {
+		ret = PTR_ERR(pinctrl_info->wlan_pon_en);
+		icnss_pr_pon_seq("Failed to get pon_en state, err %d\n", ret);
+		goto out;
+	}
+
+	pinctrl_info->wlan_pon_dis =
+		pinctrl_lookup_state(pinctrl_info->pinctrl,
+				     WLAN_PON_DIS);
+	if (IS_ERR_OR_NULL(pinctrl_info->wlan_pon_dis)) {
+		ret = PTR_ERR(pinctrl_info->wlan_pon_dis);
+		icnss_pr_pon_seq("Failed to get pon_dis state, err %d\n", ret);
+		goto out;
+	}
+
+	pinctrl_info->wlan_poff_en =
+		pinctrl_lookup_state(pinctrl_info->pinctrl,
+				     WLAN_POFF_EN);
+	if (IS_ERR_OR_NULL(pinctrl_info->wlan_poff_en)) {
+		ret = PTR_ERR(pinctrl_info->wlan_poff_en);
+		icnss_pr_pon_seq("Failed to get poff_en state, err %d\n", ret);
+		goto out;
+	}
+
+	pinctrl_info->wlan_poff_dis =
+		pinctrl_lookup_state(pinctrl_info->pinctrl,
+				     WLAN_POFF_DIS);
+	if (IS_ERR_OR_NULL(pinctrl_info->wlan_poff_dis)) {
+		ret = PTR_ERR(pinctrl_info->wlan_poff_dis);
+		icnss_pr_pon_seq("Failed to get poff_dis state, er %d\n", ret);
+		goto out;
+	}
+
+	return 0;
+out:
+	return ret;
+}
+
+int icnss_power_trigger_pinctrl(struct device *dev,
+				enum icnss_pinctrl_owner owner,
+				enum icnss_pinctrl_seq seq)
+{
+	struct icnss_priv *priv = icnss_get_plat_priv();
+	int retry = 10;
+	int ret;
+	u32 all_owners = BIT(ICNSS_PINCTRL_OWNER_WLAN) |
+			 BIT(ICNSS_PINCTRL_OWNER_BT);
+
+	if (!priv) {
+		icnss_pr_pon_seq("icnss2 not initialized");
+		return -ENODEV;
+	}
+
+	if (!priv->pon_gpio_control) {
+		icnss_pr_pon_seq("pinctrl_set: PON pinctrl not present");
+		return 0;
+	}
+
+	if (seq != ICNSS_PINCTRL_SEQ_ON && seq != ICNSS_PINCTRL_SEQ_OFF) {
+		icnss_pr_pon_seq("Invalid power seq %d", seq);
+		return -EINVAL;
+	}
+
+	icnss_pr_pon_seq("EPower : seq %d, from %d, pon,pof:0x%x, 0x%x",
+			 seq, owner, priv->pon_pinctrl_owners,
+			 priv->pof_pinctrl_owners);
+retry_op:
+	/* Don't hold the lock for long, check on pon_in_progress instead */
+	spin_lock(&priv->on_off_lock);
+	if (priv->pon_in_progress && retry) {
+		spin_unlock(&priv->on_off_lock);
+		icnss_pr_pon_seq("Wait for operation to complete");
+		usleep_range(5000, 10000);
+		retry--;
+		goto retry_op;
+	}
+
+	if (!retry && priv->pon_in_progress) {
+		icnss_pr_pon_seq("Prev operation taking too long to complete");
+		spin_unlock(&priv->on_off_lock);
+		return -EINPROGRESS;
+	}
+	priv->pon_in_progress = true;
+	spin_unlock(&priv->on_off_lock);
+
+	ret = 0;
+	/* If PON, and if _this_ owner has not already voted for PON, and none
+	 * of the other owners have triggered PON already, only then trigger
+	 * PON sequence.
+	 */
+	if (seq == ICNSS_PINCTRL_SEQ_ON &&
+	    (priv->pon_pinctrl_owners & BIT(owner)) == 0) {
+		if ((priv->pon_pinctrl_owners & all_owners) == 0) {
+			ret = icnss_power_pinctrl_set(priv, owner,
+						      ICNSS_PINCTRL_SEQ_ON);
+		} else {
+			priv->pon_pinctrl_owners |= BIT(owner);
+			priv->pof_pinctrl_owners &= ~BIT(owner);
+		}
+		goto retrn;
+	} else if (seq == ICNSS_PINCTRL_SEQ_OFF &&
+		   (priv->pof_pinctrl_owners & BIT(owner)) == 0) {
+	/* If POF, and if _this_ owner has not already voted for poff, and none
+	 * of the other owners require PON any longer, only then trigger
+	 * POFF sequence.
+	 */
+		if ((priv->pon_pinctrl_owners & ~BIT(owner)) == 0) {
+			ret = icnss_power_pinctrl_set(priv, owner,
+						      ICNSS_PINCTRL_SEQ_OFF);
+		} else {
+			priv->pon_pinctrl_owners &= ~BIT(owner);
+			priv->pof_pinctrl_owners |= BIT(owner);
+		}
+		goto retrn;
+	}
+
+retrn:
+	icnss_pr_pon_seq("XPower : seq %d, from %d, pon,pof:0x%x, 0x%x",
+			 seq, owner, priv->pon_pinctrl_owners,
+			 priv->pof_pinctrl_owners);
+
+	priv->pon_in_progress = false;
+	return ret;
+}
+EXPORT_SYMBOL(icnss_power_trigger_pinctrl);

@@ -452,6 +452,7 @@ int mhi_report_error(struct mhi_controller *mhi_cntrl)
 	struct mhi_private *mhi_priv;
 	struct mhi_sfr_info *sfr_info;
 	enum mhi_pm_state cur_state;
+	unsigned long flags;
 
 	if (!mhi_cntrl)
 		return -EINVAL;
@@ -460,7 +461,7 @@ int mhi_report_error(struct mhi_controller *mhi_cntrl)
 	mhi_priv = dev_get_drvdata(dev);
 	sfr_info = mhi_priv->sfr_info;
 
-	write_lock_irq(&mhi_cntrl->pm_lock);
+	write_lock_irqsave(&mhi_cntrl->pm_lock, flags);
 
 	cur_state = mhi_tryset_pm_state(mhi_cntrl, MHI_PM_SYS_ERR_DETECT);
 	if (cur_state != MHI_PM_SYS_ERR_DETECT) {
@@ -468,13 +469,15 @@ int mhi_report_error(struct mhi_controller *mhi_cntrl)
 			"Failed to move to state: %s from: %s\n",
 			to_mhi_pm_state_str(MHI_PM_SYS_ERR_DETECT),
 			to_mhi_pm_state_str(mhi_cntrl->pm_state));
+
+		write_unlock_irqrestore(&mhi_cntrl->pm_lock, flags);
 		return -EPERM;
 	}
 
 	/* force inactive/error state */
 	mhi_cntrl->dev_state = MHI_STATE_SYS_ERR;
 	wake_up_all(&mhi_cntrl->state_event);
-	write_unlock_irq(&mhi_cntrl->pm_lock);
+	write_unlock_irqrestore(&mhi_cntrl->pm_lock, flags);
 
 	/* copy subsystem failure reason string if supported */
 	if (sfr_info && sfr_info->buf_addr) {
@@ -1389,6 +1392,18 @@ int mhi_process_misc_bw_ev_ring(struct mhi_controller *mhi_cntrl,
 
 	spin_lock_bh(&mhi_event->lock);
 	dev_rp = mhi_to_virtual(ev_ring, er_ctxt->rp);
+
+	/**
+	 * Check the ev ring local pointer is same as ctxt pointer
+	 * if both are same do not process ev ring.
+	 */
+	if (ev_ring->rp == dev_rp) {
+		MHI_VERB("Ignore received BW event:0x%llx ev_ring RP:0x%llx\n",
+			 dev_rp->ptr,
+			 (u64)mhi_to_physical(ev_ring, ev_ring->rp));
+		spin_unlock_bh(&mhi_event->lock);
+		return 0;
+	}
 
 	/* if rp points to base, we need to wrap it around */
 	if (dev_rp == ev_ring->base)

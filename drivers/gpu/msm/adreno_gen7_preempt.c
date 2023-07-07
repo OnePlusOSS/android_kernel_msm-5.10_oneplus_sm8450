@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2022-2023, Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include "adreno.h"
@@ -203,6 +203,7 @@ static struct adreno_ringbuffer *gen7_next_ringbuffer(
 
 void gen7_preemption_trigger(struct adreno_device *adreno_dev, bool atomic)
 {
+	const struct adreno_gen7_core *gen7_core = to_gen7_core(adreno_dev);
 	struct kgsl_device *device = KGSL_DEVICE(adreno_dev);
 	struct kgsl_iommu *iommu = KGSL_IOMMU(device);
 	struct adreno_ringbuffer *next;
@@ -360,6 +361,11 @@ void gen7_preemption_trigger(struct adreno_device *adreno_dev, bool atomic)
 
 	adreno_set_preempt_state(adreno_dev, ADRENO_PREEMPT_TRIGGERED);
 
+	if (gen7_core->qos_value)
+		kgsl_sharedmem_writel(preempt->scratch,
+			PREEMPT_SCRATCH_OFFSET(QOS_VALUE_IDX),
+			gen7_core->qos_value[next->id]);
+
 	/* Trigger the preemption */
 	if (gen7_fenced_write(adreno_dev, GEN7_CP_CONTEXT_SWITCH_CNTL, cntl,
 					FENCE_STATUS_WRITEDROPPED1_MASK)) {
@@ -442,6 +448,51 @@ void gen7_preemption_callback(struct adreno_device *adreno_dev, int bit)
 	gen7_preemption_trigger(adreno_dev, true);
 }
 
+void gen7_preemption_prepare_postamble(struct adreno_device *adreno_dev)
+{
+	struct kgsl_device *device = KGSL_DEVICE(adreno_dev);
+	const struct adreno_gen7_core *gen7_core = to_gen7_core(adreno_dev);
+	struct adreno_preemption *preempt = &adreno_dev->preempt;
+	u32 *postamble, count = 0;
+
+	/*
+	 * First 28 dwords of the device scratch buffer are used to store shadow rb data.
+	 * Reserve 15 dwords in the device scratch buffer from SCRATCH_POSTAMBLE_OFFSET for
+	 * KMD postamble pm4 packets. This should be in *device->scratch* so that userspace
+	 * cannot access it.
+	 */
+	postamble = device->scratch->hostptr + SCRATCH_POSTAMBLE_OFFSET;
+
+	/* Reserve 11 dwords in the device scratch buffer to clear perfcounters */
+	if (!adreno_dev->perfcounter) {
+		postamble[count++] = cp_type7_packet(CP_REG_RMW, 3);
+		postamble[count++] = GEN7_RBBM_PERFCTR_SRAM_INIT_CMD;
+		postamble[count++] = 0x0;
+		postamble[count++] = 0x1;
+
+		postamble[count++] = cp_type7_packet(CP_WAIT_REG_MEM, 6);
+		postamble[count++] = 0x3;
+		postamble[count++] = GEN7_RBBM_PERFCTR_SRAM_INIT_STATUS;
+		postamble[count++] = 0x0;
+		postamble[count++] = 0x1;
+		postamble[count++] = 0x1;
+		postamble[count++] = 0x0;
+	}
+
+	/*
+	 * Reserve 4 dwords in the scratch buffer for dynamic QOS control feature. To ensure QOS
+	 * value is updated for first preemption, send it during bootup.
+	 */
+	if (gen7_core->qos_value) {
+		postamble[count++] = cp_type7_packet(CP_MEM_TO_REG, 3);
+		postamble[count++] = GEN7_RBBM_GBIF_CLIENT_QOS_CNTL;
+		postamble[count++] = lower_32_bits(PREEMPT_SCRATCH_ADDR(adreno_dev, QOS_VALUE_IDX));
+		postamble[count++] = upper_32_bits(PREEMPT_SCRATCH_ADDR(adreno_dev, QOS_VALUE_IDX));
+	}
+
+	preempt->postamble_len = count;
+}
+
 void gen7_preemption_schedule(struct adreno_device *adreno_dev)
 {
 	struct kgsl_device *device = KGSL_DEVICE(adreno_dev);
@@ -509,10 +560,8 @@ done:
 		*cmds++ = lower_32_bits(gpuaddr);
 		*cmds++ = upper_32_bits(gpuaddr);
 
-		/* Add a KMD post amble to clear the perf counters during preemption */
-		if (!adreno_dev->perfcounter) {
-			u64 kmd_postamble_addr =
-					PREEMPT_SCRATCH_ADDR(adreno_dev, KMD_POSTAMBLE_IDX);
+		if (adreno_dev->preempt.postamble_len) {
+			u64 kmd_postamble_addr = SCRATCH_POSTAMBLE_ADDR(KGSL_DEVICE(adreno_dev));
 
 			*cmds++ = cp_type7_packet(CP_SET_AMBLE, 3);
 			*cmds++ = lower_32_bits(kmd_postamble_addr);
@@ -670,6 +719,7 @@ static int gen7_preemption_ringbuffer_init(struct adreno_device *adreno_dev,
 
 int gen7_preemption_init(struct adreno_device *adreno_dev)
 {
+	u32 flags = ADRENO_FEATURE(adreno_dev, ADRENO_APRIV) ? KGSL_MEMDESC_PRIVILEGED : 0;
 	struct kgsl_device *device = KGSL_DEVICE(adreno_dev);
 	struct kgsl_iommu *iommu = KGSL_IOMMU(device);
 	struct adreno_preemption *preempt = &adreno_dev->preempt;
@@ -691,7 +741,7 @@ int gen7_preemption_init(struct adreno_device *adreno_dev)
 	}
 
 	ret = adreno_allocate_global(device, &preempt->scratch, PAGE_SIZE,
-			0, 0, 0, "preempt_scratch");
+			0, 0, flags, "preempt_scratch");
 	if (ret)
 		return ret;
 
@@ -704,31 +754,6 @@ int gen7_preemption_init(struct adreno_device *adreno_dev)
 			return ret;
 	}
 
-	/*
-	 * First 8 dwords of the preemption scratch buffer is used to store the address for CP
-	 * to save/restore VPC data. Reserve 11 dwords in the preemption scratch buffer from
-	 * index KMD_POSTAMBLE_IDX for KMD postamble pm4 packets
-	 */
-	if (!adreno_dev->perfcounter) {
-		u32 *postamble = preempt->scratch->hostptr + (KMD_POSTAMBLE_IDX * sizeof(u64));
-		u32 count = 0;
-
-		postamble[count++] = cp_type7_packet(CP_REG_RMW, 3);
-		postamble[count++] = GEN7_RBBM_PERFCTR_SRAM_INIT_CMD;
-		postamble[count++] = 0x0;
-		postamble[count++] = 0x1;
-
-		postamble[count++] = cp_type7_packet(CP_WAIT_REG_MEM, 6);
-		postamble[count++] = 0x3;
-		postamble[count++] = GEN7_RBBM_PERFCTR_SRAM_INIT_STATUS;
-		postamble[count++] = 0x0;
-		postamble[count++] = 0x1;
-		postamble[count++] = 0x1;
-		postamble[count++] = 0x0;
-
-		preempt->postamble_len = count;
-	}
-
 	set_bit(ADRENO_DEVICE_PREEMPTION, &adreno_dev->priv);
 	return 0;
 }
@@ -739,7 +764,7 @@ int gen7_preemption_context_init(struct kgsl_context *context)
 	struct adreno_device *adreno_dev = ADRENO_DEVICE(device);
 	u64 flags = 0;
 
-	if (!adreno_is_preemption_enabled(adreno_dev))
+	if (!ADRENO_FEATURE(adreno_dev, ADRENO_PREEMPTION))
 		return 0;
 
 	if (context->flags & KGSL_CONTEXT_SECURE)

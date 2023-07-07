@@ -38,6 +38,10 @@ void walt_init_topapp_tg(struct task_group *tg)
 
 	wtg = (struct walt_task_group *) tg->android_vendor_data1;
 
+	/*
+	 *TODO:both enable colocate & frame boost, we should disable
+	 *colocate in next version
+	 */
 	wtg->colocate = true;
 	wtg->sched_boost_enable[NO_BOOST] = false;
 	wtg->sched_boost_enable[FULL_THROTTLE_BOOST] = true;

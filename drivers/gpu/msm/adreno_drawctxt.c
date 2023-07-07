@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2002,2007-2021, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <linux/debugfs.h>
 
 #include "adreno.h"
 #include "adreno_trace.h"
+#ifdef OPLUS_FEATURE_DISPLAY
+#include <soc/oplus/system/oplus_mm_kevent_fb.h>
+#endif /* OPLUS_FEATURE_DISPLAY */
 
 static void wait_callback(struct kgsl_device *device,
 		struct kgsl_event_group *group, void *priv, int result)
@@ -79,6 +83,9 @@ void adreno_drawctxt_dump(struct kgsl_device *device,
 			dev_err(device->dev,
 				"  possible deadlock. Context %u might be blocked for itself\n",
 				context->id);
+#ifdef OPLUS_FEATURE_DISPLAY
+			mm_fb_display_kevent("DisplayDriverID@@423$$", MM_FB_KEY_RATELIMIT_1H, "gpu syncpoint deadlock", "Context %u might be blocked\n", context->id);
+#endif /* OPLUS_FEATURE_DISPLAY */
 			goto stats;
 		}
 
@@ -297,12 +304,25 @@ void adreno_drawctxt_invalidate(struct kgsl_device *device,
 void adreno_drawctxt_set_guilty(struct kgsl_device *device,
 		struct kgsl_context *context)
 {
+	struct adreno_context *drawctxt;
+
 	if (!context)
 		return;
 
 	context->reset_status = KGSL_CTX_STAT_GUILTY_CONTEXT_RESET_EXT;
 
 	adreno_drawctxt_invalidate(device, context);
+
+	drawctxt = ADRENO_CONTEXT(context);
+
+	if (list_empty(&drawctxt->hw_fence_list))
+		return;
+
+	/*
+	 * This makes sure that any pending hardware fences from this context
+	 * are sent to TxQueue after recovery
+	 */
+	set_bit(ADRENO_CONTEXT_DRAIN_HW_FENCE, &context->priv);
 }
 
 #define KGSL_CONTEXT_PRIORITY_MED	0x8
@@ -338,6 +358,7 @@ adreno_drawctxt_create(struct kgsl_device_private *dev_priv,
 		KGSL_CONTEXT_IFH_NOP |
 		KGSL_CONTEXT_SECURE |
 		KGSL_CONTEXT_PREEMPT_STYLE_MASK |
+		KGSL_CONTEXT_LPAC |
 		KGSL_CONTEXT_NO_SNAPSHOT |
 		KGSL_CONTEXT_FAULT_INFO);
 
@@ -359,6 +380,17 @@ adreno_drawctxt_create(struct kgsl_device_private *dev_priv,
 	if (!kgsl_mmu_is_secured(&dev_priv->device->mmu) &&
 			(local & KGSL_CONTEXT_SECURE)) {
 		dev_err_once(device->dev, "Secure context not supported\n");
+		return ERR_PTR(-EOPNOTSUPP);
+	}
+
+	if ((local & KGSL_CONTEXT_LPAC) &&
+			(!(adreno_dev->lpac_enabled))) {
+		dev_err_once(device->dev, "LPAC context not supported\n");
+		return ERR_PTR(-EOPNOTSUPP);
+	}
+
+	if ((local & KGSL_CONTEXT_LPAC) && (local & KGSL_CONTEXT_SECURE)) {
+		dev_err_once(device->dev, "LPAC secure context not supported\n");
 		return ERR_PTR(-EOPNOTSUPP);
 	}
 
@@ -413,6 +445,7 @@ adreno_drawctxt_create(struct kgsl_device_private *dev_priv,
 	adreno_context_debugfs_init(ADRENO_DEVICE(device), drawctxt);
 
 	INIT_LIST_HEAD(&drawctxt->active_node);
+	INIT_LIST_HEAD(&drawctxt->hw_fence_list);
 
 	if (adreno_dev->dispatch_ops && adreno_dev->dispatch_ops->setup_context)
 		adreno_dev->dispatch_ops->setup_context(adreno_dev, drawctxt);
@@ -557,11 +590,19 @@ void adreno_drawctxt_detach(struct kgsl_context *context)
 void adreno_drawctxt_destroy(struct kgsl_context *context)
 {
 	struct adreno_context *drawctxt;
+	struct adreno_device *adreno_dev;
+	const struct adreno_gpudev *gpudev;
 
 	if (context == NULL)
 		return;
 
 	drawctxt = ADRENO_CONTEXT(context);
+
+	adreno_dev = ADRENO_DEVICE(context->device);
+	gpudev = ADRENO_GPU_DEVICE(adreno_dev);
+
+	if (gpudev->context_destroy)
+		gpudev->context_destroy(adreno_dev, drawctxt);
 	kfree(drawctxt);
 }
 

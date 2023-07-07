@@ -31,6 +31,12 @@
 #include "qmi.h"
 #include "debug.h"
 #include "genl.h"
+#ifdef OPLUS_FEATURE_WIFI_BDF
+//Modify for: multi projects using different bdf
+#include <linux/fs.h>
+#include <asm/uaccess.h>
+#include <soc/oplus/system/oplus_project.h>
+#endif /* OPLUS_FEATURE_WIFI_BDF */
 
 #define WLFW_SERVICE_WCN_INS_ID_V01	3
 #define WLFW_SERVICE_INS_ID_V01		0
@@ -877,6 +883,10 @@ int icnss_wlfw_wlan_mac_req_send_sync(struct icnss_priv *priv,
 	struct wlfw_mac_addr_resp_msg_v01 resp = {0};
 	struct qmi_txn txn;
 	int ret;
+#ifdef OPLUS_FEATURE_WIFI_BDF
+    int i;
+    char revert_mac[QMI_WLFW_MAC_ADDR_SIZE_V01];
+#endif /* OPLUS_FEATURE_WIFI_BDF */
 
 	if (!priv || !mac || mac_len != QMI_WLFW_MAC_ADDR_SIZE_V01)
 		return -EINVAL;
@@ -892,7 +902,17 @@ int icnss_wlfw_wlan_mac_req_send_sync(struct icnss_priv *priv,
 
 	icnss_pr_dbg("Sending WLAN mac req [%pM], state: 0x%lx\n",
 			     mac, priv->state);
-	memcpy(req.mac_addr, mac, mac_len);
+#ifdef OPLUS_FEATURE_WIFI_BDF
+    for (i = 0; i < QMI_WLFW_MAC_ADDR_SIZE_V01 ; i ++){
+        revert_mac[i] = mac[QMI_WLFW_MAC_ADDR_SIZE_V01 - i -1];
+    }
+        icnss_pr_dbg("Sending revert WLAN mac req [%pM], state: 0x%lx\n",
+                revert_mac, priv->state);
+    memcpy(req.mac_addr, revert_mac, mac_len);
+#else
+    memcpy(req.mac_addr, mac, mac_len);
+#endif /* OPLUS_FEATURE_WIFI_BDF */
+
 	req.mac_addr_valid = 1;
 
 	ret = qmi_send_request(&priv->qmi, NULL, &txn,
@@ -1114,6 +1134,15 @@ int icnss_wlfw_bdf_dnld_send_sync(struct icnss_priv *priv, u32 bdf_type)
 	temp = fw_entry->data;
 	remaining = fw_entry->size;
 
+
+#ifdef OPLUS_FEATURE_WIFI_DCS_SWITCH
+    //Add for: check fw status for switch issue
+    if (bdf_type == ICNSS_BDF_REGDB) {
+        set_bit(CNSS_LOAD_REGDB_SUCCESS, &priv->loadRegdbState);
+    } else if (bdf_type == ICNSS_BDF_ELF){
+        set_bit(CNSS_LOAD_BDF_SUCCESS, &priv->loadBdfState);
+    }
+#endif /* OPLUS_FEATURE_WIFI_DCS_SWITCH */
 	icnss_pr_dbg("Downloading %s: %s, size: %u\n",
 		     icnss_bdf_type_to_str(bdf_type), filename, remaining);
 
@@ -1187,6 +1216,14 @@ int icnss_wlfw_bdf_dnld_send_sync(struct icnss_priv *priv, u32 bdf_type)
 err_send:
 	release_firmware(fw_entry);
 err_req_fw:
+#ifdef OPLUS_FEATURE_WIFI_DCS_SWITCH
+    //Add for: check fw status for switch issue
+    if (bdf_type == ICNSS_BDF_REGDB) {
+        set_bit(CNSS_LOAD_REGDB_FAIL, &priv->loadRegdbState);
+    } else if (bdf_type == ICNSS_BDF_ELF){
+        set_bit(CNSS_LOAD_BDF_FAIL, &priv->loadBdfState);
+    }
+#endif /* OPLUS_FEATURE_WIFI_DCS_SWITCH */
 	if (bdf_type != ICNSS_BDF_REGDB)
 		ICNSS_QMI_ASSERT();
 	kfree(req);
@@ -1464,6 +1501,13 @@ int wlfw_wlan_mode_send_sync_msg(struct icnss_priv *priv,
 	req->mode = mode;
 	req->hw_debug_valid = 1;
 	req->hw_debug = !!test_bit(HW_DEBUG_ENABLE, &priv->ctrl_params.quirks);
+
+	if (priv->wlan_en_delay_ms >= 100) {
+		icnss_pr_dbg("Setting WLAN_EN delay: %d ms\n",
+			     priv->wlan_en_delay_ms);
+		req->wlan_en_delay_valid = 1;
+		req->wlan_en_delay = priv->wlan_en_delay_ms;
+	}
 
 	priv->stats.mode_req++;
 

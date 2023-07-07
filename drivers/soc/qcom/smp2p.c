@@ -122,6 +122,7 @@ struct smp2p_entry {
  * @in:		pointer to the inbound smem item
  * @smem_items:	ids of the two smem items
  * @valid_entries: already scanned inbound entries
+ * @irq_devname: poniter to the smp2p irq devname
  * @local_pid:	processor id of the inbound edge
  * @remote_pid:	processor id of the outbound edge
  * @ipc_regmap:	regmap for the outbound ipc
@@ -146,6 +147,7 @@ struct qcom_smp2p {
 	bool ssr_ack;
 	bool open;
 
+	char *irq_devname;
 	unsigned local_pid;
 	unsigned remote_pid;
 
@@ -552,6 +554,7 @@ static int smp2p_parse_ipc(struct qcom_smp2p *smp2p)
 	}
 
 	smp2p->ipc_regmap = syscon_node_to_regmap(syscon);
+	of_node_put(syscon);
 	if (IS_ERR(smp2p->ipc_regmap))
 		return PTR_ERR(smp2p->ipc_regmap);
 
@@ -571,6 +574,34 @@ static int smp2p_parse_ipc(struct qcom_smp2p *smp2p)
 	return 0;
 }
 
+#ifdef CONFIG_OPLUS_POWERINFO_STANDBY_DEBUG
+static char * smp2p_get_device_node_name(const struct device_node *np)
+{
+	char *name = NULL;
+	const char *node_name;
+	size_t len;
+
+	if (!np) {
+		pr_info("%s %d : name is NULL\n", __func__, __LINE__);
+		return NULL;
+	}
+
+	pr_info("%s %d : full name is %s\n", __func__, __LINE__, np->full_name);
+	node_name = kbasename(np->full_name);
+	len = strlen(node_name);
+
+	name = (char *)kzalloc(len+1, GFP_KERNEL);
+	if(!name) {
+		pr_info("%s %d : name is NULL\n", __func__, __LINE__);
+		return NULL;
+	}
+	strncpy(name, node_name, len);
+	pr_info("%s %d : name is %s\n", __func__, __LINE__, name);
+
+	return name;
+}
+#endif
+
 static int qcom_smp2p_probe(struct platform_device *pdev)
 {
 	struct smp2p_entry *entry;
@@ -578,6 +609,9 @@ static int qcom_smp2p_probe(struct platform_device *pdev)
 	struct qcom_smp2p *smp2p;
 	const char *key;
 	int ret;
+	#ifdef CONFIG_OPLUS_POWERINFO_STANDBY_DEBUG
+	char *object_name = NULL;
+	#endif
 
 	if (!ilc)
 		ilc = ipc_log_context_create(SMP2P_LOG_PAGE_CNT, "smp2p", 0);
@@ -661,7 +695,15 @@ static int qcom_smp2p_probe(struct platform_device *pdev)
 		}
 	}
 
+	#ifdef CONFIG_OPLUS_POWERINFO_STANDBY_DEBUG
+	object_name = smp2p_get_device_node_name(pdev->dev.of_node);
+	if(!object_name) {
+		object_name = "smp2p";
+	}
+	smp2p->ws = wakeup_source_register(&pdev->dev, object_name);
+	#else
 	smp2p->ws = wakeup_source_register(&pdev->dev, "smp2p");
+	#endif
 	if (!smp2p->ws) {
 		ret = -ENOMEM;
 		goto unwind_interfaces;
@@ -669,11 +711,22 @@ static int qcom_smp2p_probe(struct platform_device *pdev)
 
 	/* Kick the outgoing edge after allocating entries */
 	qcom_smp2p_kick(smp2p);
-
+	smp2p->irq_devname = kasprintf(GFP_KERNEL, "smp2p_%d", smp2p->remote_pid);
+	if (!smp2p->irq_devname) {
+		ret = -ENOMEM;
+		goto unreg_ws;
+	}
+	#ifdef CONFIG_OPLUS_POWERINFO_STANDBY_DEBUG
 	ret = devm_request_threaded_irq(&pdev->dev, smp2p->irq,
 					qcom_smp2p_isr, qcom_smp2p_intr,
 					IRQF_ONESHOT,
-					"smp2p", (void *)smp2p);
+					object_name, (void *)smp2p);
+	#else
+	ret = devm_request_threaded_irq(&pdev->dev, smp2p->irq,
+					qcom_smp2p_isr, qcom_smp2p_intr,
+					IRQF_ONESHOT,
+					smp2p->irq_devname, (void *)smp2p);
+	#endif
 	if (ret) {
 		dev_err(&pdev->dev, "failed to request interrupt\n");
 		goto unreg_ws;
@@ -692,6 +745,8 @@ unwind_interfaces:
 
 	list_for_each_entry(entry, &smp2p->outbound, node)
 		qcom_smem_state_unregister(entry->state);
+
+	kfree(smp2p->irq_devname);
 
 	smp2p->out->valid_entries = 0;
 
@@ -719,6 +774,8 @@ static int qcom_smp2p_remove(struct platform_device *pdev)
 		qcom_smem_state_unregister(entry->state);
 
 	mbox_free_channel(smp2p->mbox_chan);
+
+	kfree(smp2p->irq_devname);
 
 	smp2p->out->valid_entries = 0;
 

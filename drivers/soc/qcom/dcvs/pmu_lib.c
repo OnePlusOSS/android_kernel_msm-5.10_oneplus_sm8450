@@ -35,9 +35,19 @@
 #define INVALID_ID	0xFF
 static void __iomem *pmu_base;
 
-struct cpucp_pmu_ctrs {
+struct evctrs_64 {
 	u64 evctrs[MAX_CPUCP_EVT];
 	u32 valid;
+};
+
+struct evctrs_32 {
+	u32 evctrs[MAX_CPUCP_EVT];
+	u32 valid;
+};
+
+union cpucp_pmu_ctrs {
+	struct evctrs_64 evctrs_64;
+	struct evctrs_32 evctrs_32;
 };
 
 struct event_data {
@@ -262,7 +272,7 @@ static int __qcom_pmu_read(int cpu, u32 event_id, u64 *pmu_data, bool local)
 	if (!qcom_pmu_inited)
 		return -ENODEV;
 
-	if (!event_id || !pmu_data || cpu >= num_possible_cpus())
+	if (!event_id || !pmu_data || !cpumask_test_cpu(cpu, cpu_possible_mask))
 		return -EINVAL;
 
 	cpu_data = per_cpu(cpu_ev_data, cpu);
@@ -299,7 +309,7 @@ int __qcom_pmu_read_all(int cpu, struct qcom_pmu_data *data, bool local)
 	if (!qcom_pmu_inited)
 		return -ENODEV;
 
-	if (!data || cpu >= num_possible_cpus())
+	if (!data || !cpumask_test_cpu(cpu, cpu_possible_mask))
 		return -EINVAL;
 
 	cpu_data = per_cpu(cpu_ev_data, cpu);
@@ -338,7 +348,7 @@ static struct event_data *get_event(u32 event_id, int cpu)
 	if (!qcom_pmu_inited)
 		return ERR_PTR(-EPROBE_DEFER);
 
-	if (!event_id || cpu >= num_possible_cpus())
+	if (!event_id || !cpumask_test_cpu(cpu, cpu_possible_mask))
 		return ERR_PTR(-EINVAL);
 
 	cpu_data = per_cpu(cpu_ev_data, cpu);
@@ -531,8 +541,13 @@ static int memlat_pm_notif(struct notifier_block *nb, unsigned long action,
 	u64 count;
 	bool pmu_valid = false;
 	bool read_ev  = true;
-	struct cpucp_pmu_ctrs *base = pmu_base + (sizeof(struct cpucp_pmu_ctrs) * cpu);
+	union cpucp_pmu_ctrs *base;
 	unsigned long flags;
+
+	if (pmu_long_counter)
+		base = pmu_base + (sizeof(struct evctrs_64) * cpu);
+	else
+		base = pmu_base + (sizeof(struct evctrs_32) * cpu);
 
 	/* Exit if cpu is in hotplug */
 	spin_lock_irqsave(&cpu_data->read_lock, flags);
@@ -542,8 +557,12 @@ static int memlat_pm_notif(struct notifier_block *nb, unsigned long action,
 	}
 
 	if (action == CPU_PM_EXIT) {
-		if (pmu_base)
-			writel_relaxed(0, &base->valid);
+		if (pmu_base) {
+			if (pmu_long_counter)
+				writel_relaxed(0, &base->evctrs_64.valid);
+			else
+				writel_relaxed(0, &base->evctrs_32.valid);
+	}
 		cpu_data->is_pc = false;
 		spin_unlock_irqrestore(&cpu_data->read_lock, flags);
 		return NOTIFY_OK;
@@ -570,11 +589,18 @@ static int memlat_pm_notif(struct notifier_block *nb, unsigned long action,
 		/* Store pmu values in allocated cpucp pmu region */
 		pmu_valid = true;
 		count = cached_count_value(ev, ev->cached_count, is_amu_valid(aid));
-		writeq_relaxed(count, &base->evctrs[cid]);
+		if (pmu_long_counter)
+			writeq_relaxed(count, &base->evctrs_64.evctrs[cid]);
+		else
+			writel_relaxed(count, &base->evctrs_32.evctrs[cid]);
 	}
 	/* Set valid cache flag to allow cpucp to read from this memory location */
-	if (pmu_valid)
-		writel_relaxed(1, &base->valid);
+	if (pmu_valid) {
+		if (pmu_long_counter)
+			writel_relaxed(1, &base->evctrs_64.valid);
+		else
+			writel_relaxed(1, &base->evctrs_32.valid);
+	}
 
 dec_read_cnt:
 	if (read_ev)
@@ -595,7 +621,7 @@ static int qcom_pmu_hotplug_coming_up(unsigned int cpu)
 	int i, ret = 0;
 	unsigned long flags;
 	struct event_data *ev;
-	struct cpucp_pmu_ctrs *base = pmu_base + (sizeof(struct cpucp_pmu_ctrs) * cpu);
+	union cpucp_pmu_ctrs *base;
 	cpumask_t mask;
 
 	if (!attr)
@@ -617,8 +643,17 @@ static int qcom_pmu_hotplug_coming_up(unsigned int cpu)
 	cpumask_set_cpu(cpu, &mask);
 	configure_cpucp_map(mask);
 	/* Set valid as 0 as exiting hotplug */
-	if (pmu_base)
-		writel_relaxed(0, &base->valid);
+	if (pmu_long_counter)
+		base = pmu_base + (sizeof(struct evctrs_64) * cpu);
+	else
+		base = pmu_base + (sizeof(struct evctrs_32) * cpu);
+	if (pmu_base) {
+		if (pmu_long_counter)
+			writel_relaxed(0, &base->evctrs_64.valid);
+		else
+			writel_relaxed(0, &base->evctrs_32.valid);
+	}
+
 
 	spin_lock_irqsave(&cpu_data->read_lock, flags);
 	cpu_data->is_hp = false;
@@ -636,7 +671,7 @@ static int qcom_pmu_hotplug_going_down(unsigned int cpu)
 	unsigned long flags;
 	bool pmu_valid = false;
 	u64 count;
-	struct cpucp_pmu_ctrs *base = pmu_base + (sizeof(struct cpucp_pmu_ctrs) * cpu);
+	union cpucp_pmu_ctrs *base;
 
 	if (!qcom_pmu_inited)
 		return 0;
@@ -653,17 +688,28 @@ static int qcom_pmu_hotplug_going_down(unsigned int cpu)
 		if (!is_event_valid(ev))
 			continue;
 		ev->cached_count = read_event(ev, false);
+		if (pmu_long_counter)
+			base = pmu_base + (sizeof(struct evctrs_64) * cpu);
+		else
+			base = pmu_base + (sizeof(struct evctrs_32) * cpu);
 		/* Store pmu values in allocated cpucp pmu region */
 		if (pmu_base && is_event_shared(ev)) {
 			pmu_valid = true;
 			count = cached_count_value(ev, ev->cached_count, is_amu_valid(aid));
-			writeq_relaxed(count, &base->evctrs[cid]);
+			if (pmu_long_counter)
+				writeq_relaxed(count, &base->evctrs_64.evctrs[cid]);
+			else
+				writel_relaxed(count, &base->evctrs_32.evctrs[cid]);
 		}
 		delete_event(ev);
 	}
 
-	if (pmu_valid)
-		writel_relaxed(1, &base->valid);
+	if (pmu_valid) {
+		if (pmu_long_counter)
+			writel_relaxed(1, &base->evctrs_64.valid);
+		else
+			writel_relaxed(1, &base->evctrs_32.valid);
+	}
 	return 0;
 }
 
@@ -671,7 +717,7 @@ static int qcom_pmu_cpu_hp_init(void)
 {
 	int ret;
 
-	ret = cpuhp_setup_state_nocalls(CPUHP_AP_ONLINE_DYN,
+	ret = cpuhp_setup_state_nocalls_cpuslocked(CPUHP_AP_ONLINE_DYN,
 				"QCOM_PMU",
 				qcom_pmu_hotplug_coming_up,
 				qcom_pmu_hotplug_going_down);
@@ -691,12 +737,15 @@ static void cache_counters(void)
 	int i, cid;
 	unsigned int cpu;
 	struct event_data *event;
-	struct cpucp_pmu_ctrs *base;
+	union cpucp_pmu_ctrs *base;
 	bool pmu_valid;
 
 	for_each_possible_cpu(cpu) {
 		cpu_data = per_cpu(cpu_ev_data, cpu);
-		base = pmu_base + (sizeof(struct cpucp_pmu_ctrs) * cpu);
+		if (pmu_long_counter)
+			base = pmu_base + (sizeof(struct evctrs_64) * cpu);
+		else
+			base = pmu_base + (sizeof(struct evctrs_32) * cpu);
 		pmu_valid = false;
 		for (i = 0; i < cpu_data->num_evs; i++) {
 			event = &cpu_data->events[i];
@@ -707,12 +756,20 @@ static void cache_counters(void)
 			/* Store pmu values in allocated cpucp pmu region */
 			if (pmu_base && is_event_shared(event)) {
 				pmu_valid = true;
-				writel_relaxed(event->cached_count,
-						&base->evctrs[cid]);
+				if (pmu_long_counter)
+					writeq_relaxed(event->cached_count,
+					&base->evctrs_64.evctrs[cid]);
+				else
+					writel_relaxed(event->cached_count,
+					&base->evctrs_32.evctrs[cid]);
 			}
 		}
-		if (pmu_valid)
-			writel_relaxed(1, &base->valid);
+		if (pmu_valid) {
+			if (pmu_long_counter)
+				writel_relaxed(1, &base->evctrs_64.valid);
+			else
+				writel_relaxed(1, &base->evctrs_32.valid);
+		}
 	}
 }
 
@@ -808,9 +865,7 @@ static int setup_events(void)
 		pr_err("qcom pmu driver failed to initialize hotplug: %d\n", ret);
 		goto out;
 	}
-	register_trace_android_vh_cpu_idle_enter(qcom_pmu_idle_enter_notif, NULL);
-	register_trace_android_vh_cpu_idle_exit(qcom_pmu_idle_exit_notif, NULL);
-	cpu_pm_register_notifier(&memlat_event_pm_nb);
+
 	goto out;
 
 cleanup_events:
@@ -823,6 +878,11 @@ cleanup_events:
 	}
 out:
 	put_online_cpus();
+	if (ret != -EPROBE_DEFER && ret != cpuhp_state) {
+		register_trace_android_vh_cpu_idle_enter(qcom_pmu_idle_enter_notif, NULL);
+		register_trace_android_vh_cpu_idle_exit(qcom_pmu_idle_exit_notif, NULL);
+		cpu_pm_register_notifier(&memlat_event_pm_nb);
+	}
 	kfree(attr);
 	return ret;
 }
@@ -852,8 +912,8 @@ int rimps_pmu_init(struct scmi_device *sdev)
 		return -EINVAL;
 
 	ops = sdev->handle->devm_get_protocol(sdev, SCMI_PMU_PROTOCOL, &ph);
-	if (!ops)
-		return -EINVAL;
+	if (IS_ERR(ops))
+		return PTR_ERR(ops);
 
 	/*
 	 * If communication with cpucp doesn't succeed here the device memory
@@ -872,7 +932,7 @@ static int configure_pmu_event(u32 event_id, int amu_id, int cid, int cpu)
 	struct cpu_data *cpu_data;
 	struct event_data *event;
 
-	if (!event_id || cpu >= num_possible_cpus())
+	if (!event_id || !cpumask_test_cpu(cpu, cpu_possible_mask))
 		return -EINVAL;
 
 	cpu_data = per_cpu(cpu_ev_data, cpu);
@@ -933,9 +993,11 @@ static int init_pmu_events(struct device *dev)
 			return -EINVAL;
 
 		for_each_cpu(cpu, to_cpumask(&cpus)) {
-			ret = configure_pmu_event(event_id, amu_id, cid, cpu);
-			if (ret < 0)
-				return ret;
+			if (cpumask_test_cpu(cpu, cpu_possible_mask)) {
+				ret = configure_pmu_event(event_id, amu_id, cid, cpu);
+				if (ret < 0)
+					return ret;
+			}
 		}
 
 		if (is_cid_valid(cid)) {

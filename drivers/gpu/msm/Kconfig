@@ -116,3 +116,22 @@ config QCOM_KGSL_PROCESS_RECLAIM
 	  foreground/background activity through the sysfs entry exposed per
 	  process. Based on this kgsl can unpin given number of pages from
 	  background processes and make them available to the shrinker.
+
+config DRM_PANEL_NOTIFY
+	tristate "CONFIG_DRM_PANEL_NOTIFY"
+	help
+	 Say 'y' or 'm' to support drm panel notify
+	 Say 'n' to not support drm panel notify
+
+config OPLUS_GPU_MINIDUMP
+	bool "oplus gpu minidump custom"
+	depends on QCOM_KGSL
+	default y
+	help
+	 When enabled, oplus gpu minidump custom is enabled.
+
+config OPLUS_FEATURE_KGSL_BUS_NOLIMIT
+	bool "oplus gpu vote bus no limit"
+	depends on QCOM_KGSL
+	help
+	  When enabled, oplus gpu vote bus freq based last vote value and without any limit in opp table.

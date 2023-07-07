@@ -426,6 +426,7 @@ static irqreturn_t tcs_tx_done(int irq, void *p)
 	int i;
 	unsigned long irq_status;
 	const struct tcs_request *req;
+	u32 enable;
 
 	irq_status = readl_relaxed(drv->tcs_base + RSC_DRV_IRQ_STATUS);
 
@@ -450,6 +451,12 @@ skip:
 		/* Reclaim the TCS */
 		write_tcs_reg(drv, RSC_DRV_CMD_ENABLE, i, 0);
 		writel_relaxed(BIT(i), drv->tcs_base + RSC_DRV_IRQ_CLEAR);
+
+		/* Clear the AMC MODE Trigger */
+		enable = read_tcs_reg(drv, RSC_DRV_CONTROL, i);
+		enable &= ~TCS_AMC_MODE_TRIGGER;
+		write_tcs_reg(drv, RSC_DRV_CONTROL, i, enable);
+
 		spin_lock(&drv->lock);
 		clear_bit(i, drv->tcs_in_use);
 		/*

@@ -29,6 +29,7 @@ config QCOM_COMMAND_DB
 config QCOM_CPUSS_SLEEP_STATS
 	tristate "Qualcomm Technologies, Inc. (QTI) CPUSS sleep stats driver"
 	depends on DEBUG_FS
+	depends on QCOM_SCM
 	help
 	 Qualcomm Technologies, Inc. (QTI) CPUSS sleep stats driver to get
 	 hardware LPM counts and residency for particular core/cluster
@@ -228,6 +229,15 @@ config QCOM_LLCC_PERFMON
 	  This is used for performance and debug activity and exports sysfs
 	  interface. sysfs interface is used to configure and dump the LLCC
 	  performance events.
+
+config QCOM_SPAD_PERFMON
+	tristate "Qualcomm Technologies, Inc. SPAD Perfmon driver"
+	depends on QCOM_LLCC
+	help
+	  This option enables driver for SPAD Performance monitor block. Using
+	  this various events in SPAD LPI LB block can be monitored.
+	  Exports sysfs interface to configure and dump the SPAD performance
+	  events.
 
 config QCOM_KRYO_L2_ACCESSORS
 	bool
@@ -544,6 +554,12 @@ config QCOM_SOC_SLEEP_STATS
 	  various SoC level low power modes statistics and export to debugfs
 	  interface.
 
+config OPLUS_POWERINFO_RPMH
+	bool "powerinfo rpmh config"
+	default n
+	help
+	  Select this config to enable powerinfo rpmh
+
 config QCOM_ADSP_SLEEPMON
 	tristate "ADSP sleep monitor"
 	depends on QCOM_SMEM
@@ -706,8 +722,7 @@ config MSM_PERFORMANCE
           writing cpu#:freq values
 
 config QMP_DEBUGFS_CLIENT
-	bool "Debugfs Client to communicate with AOP using QMP protocol"
-	depends on DEBUG_FS
+	tristate "Debugfs Client to communicate with AOP using QMP protocol"
 	help
 	  This options enables a driver which allows clients to send messages
 	  to Alway On processor using QMP transport. Users can echo a message
@@ -886,6 +901,19 @@ config QTI_GPLAF_SCMI_CLIENT
 	  driver, and interface driver will use this handle to communicate
 	  with RIMPS GPLAF.
 
+config QTI_SHARED_RAIL_CLIENT
+    tristate "Qualcomm Technologies, Inc. SCMI client driver for SHARED RAIL"
+	depends on MSM_PERFORMANCE && QTI_SCMI_SHARED_RAIL_PROTOCOL
+	help
+	  SCMI client driver registers itself with SCMI framework for SHARED RAIL
+	  vendor protocol, and also registers with the shared rail interface driver
+	  msm_performance.
+
+	  This driver delivers the Shared Rail vendor protocal handle to interface
+	  driver. Interface driver will use this handle to communicate with Shared
+	  Rail and provide sysfs nodes to enable/disable L3 and Silver Core frequency
+	  boost.
+
 config QCOM_SUBSYSTEM_SLEEP_STATS
 	tristate "Qualcomm Technologies, Inc. Subsystem sleep stats driver"
 	depends on QCOM_SMEM
@@ -1016,7 +1044,7 @@ config QCOM_WATCHDOG_BARK_TIME
 	depends on QCOM_WDT_CORE
 	int "Qualcomm Technologies, Inc. Watchdog bark time in ms"
 	default 11000
-	range 11000 11000
+	range 11000 20000
 	help
 	  The amount of time, in milliseconds, that should elapse after
 	  a watchdog timer reset before a bark interrupt is sent from the
@@ -1154,7 +1182,7 @@ config QCOM_HYP_CORE_CTL
 
 config QTI_CRYPTO_COMMON
 	tristate "Enable common crypto functionality used for FBE"
-	depends on SCSI_UFS_CRYPTO_QTI
+	depends on SCSI_UFS_CRYPTO_QTI || MMC_CRYPTO_QTI
 	help
 	 Say 'Y' to enable the common crypto implementation to be used by
 	 different storage layers such as UFS and EMMC for file based hardware

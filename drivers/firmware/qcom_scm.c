@@ -1390,6 +1390,25 @@ int qcom_scm_kgsl_set_smmu_aperture(unsigned int num_context_bank)
 }
 EXPORT_SYMBOL(qcom_scm_kgsl_set_smmu_aperture);
 
+int qcom_scm_kgsl_set_smmu_lpac_aperture(unsigned int num_context_bank)
+{
+	struct qcom_scm_desc desc = {
+		.svc = QCOM_SCM_SVC_MP,
+		.cmd = QCOM_SCM_MP_CP_SMMU_APERTURE_ID,
+		.owner = ARM_SMCCC_OWNER_SIP,
+		.args[0] = 0xffff0000
+			   | ((QCOM_SCM_CP_LPAC_APERTURE_REG & 0xff) << 8)
+			   | (num_context_bank & 0xff),
+		.args[1] = 0xffffffff,
+		.args[2] = 0xffffffff,
+		.args[3] = 0xffffffff,
+		.arginfo = QCOM_SCM_ARGS(4),
+	};
+
+	return qcom_scm_call(__scm->dev, &desc, NULL);
+}
+EXPORT_SYMBOL(qcom_scm_kgsl_set_smmu_lpac_aperture);
+
 int qcom_scm_enable_shm_bridge(void)
 {
 	int ret;
@@ -2602,6 +2621,71 @@ static irqreturn_t qcom_scm_irq_handler(int irq, void *p)
 	schedule_work(&scm->waitq.scm_irq_work);
 
 	return IRQ_HANDLED;
+}
+
+/**
+ * scm_mem_protection_init_do() - Makes core kernel bootup milestone call
+ *                                to Kernel Protect (KP) in Hypervisor
+ *                                to start kernel memory protection. KP will
+ *                                start protection on kernel sections like
+ *                                .text, .rodata, .bss, .data with applying
+ *                                permissions in EL2 page table.
+ *
+ * @pid_offset:       Offset of PID in task_struct structure to pass in
+ *                    hypervisor syscall.
+ * @task_name_offset: Offset of task name in task_struct structure to pass in
+ *                    hypervisor syscall.
+ *
+ * Returns 0 on success.
+ */
+int  scm_mem_protection_init_do(void)
+{
+	int ret = 0, resp;
+	uint32_t pid_offset = 0;
+	uint32_t task_name_offset = 0;
+	struct qcom_scm_desc desc = {
+		.svc = SCM_SVC_RTIC,
+		.cmd = TZ_HLOS_NOTIFY_CORE_KERNEL_BOOTUP,
+		.owner = ARM_SMCCC_OWNER_SIP,
+		.arginfo = QCOM_SCM_ARGS(2),
+	};
+
+	struct qcom_scm_res res;
+
+	if (!__scm) {
+		pr_err("SCM dev is not initialized\n");
+		ret = -1;
+		return ret;
+	}
+
+	/*
+	 * Fetching offset of PID and task_name from task_struct.
+	 * This will be used by fault handler of Kernel Protect (KP)
+	 * in hypervisor to read PID and task name of process for
+	 * which KP fault handler is triggered. This is required to
+	 * record PID and task name in integrity report of kernel.
+	 */
+	pid_offset = offsetof(struct task_struct, pid);
+	task_name_offset = offsetof(struct task_struct, comm);
+
+	pr_debug("offset of pid is %zu, offset of comm is %zu\n",
+			pid_offset, task_name_offset);
+	desc.args[0] = pid_offset,
+	desc.args[1] = task_name_offset,
+
+	ret = qcom_scm_call(__scm ? __scm->dev : NULL, &desc, &res);
+	resp = res.result[0];
+
+	pr_debug("SCM call values: ret %d, resp %d\n",
+			ret, resp);
+
+	if (ret || resp) {
+		pr_err("SCM call failed %d, resp %d\n", ret, resp);
+		if (ret)
+			return ret;
+	}
+
+	return resp;
 }
 
 static int qcom_scm_probe(struct platform_device *pdev)

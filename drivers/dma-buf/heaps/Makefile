@@ -1,10 +1,15 @@
 # SPDX-License-Identifier: GPL-2.0
+ifdef CONFIG_OPLUS_FEATURE_MM_OSVELTE
+ccflags-y  += -I$(srctree)/mm/oplus_mm/mm_osvelte/
+endif
+
 obj-$(CONFIG_DMABUF_HEAPS_DEFERRED_FREE) += deferred-free-helper.o
 obj-$(CONFIG_DMABUF_HEAPS_PAGE_POOL)	+= page_pool.o
 obj-$(CONFIG_DMABUF_HEAPS_SYSTEM)	+= system_heap.o
 obj-$(CONFIG_DMABUF_HEAPS_CMA)		+= cma_heap.o
 obj-$(CONFIG_QCOM_DMABUF_HEAPS)		+= qcom_dma_heaps.o
 qcom_dma_heaps-y			:= qcom_dma_heap.o qcom_dt_parser.o qcom_sg_ops.o
+qcom_dma_heaps-$(CONFIG_OPLUS_FEATURE_MM_BOOSTPOOL) += oplus_boostpool/oplus_boost_pool.o
 qcom_dma_heaps-$(CONFIG_QCOM_DMABUF_HEAPS_SYSTEM) += qcom_system_heap.o \
 						     qcom_dynamic_page_pool.o
 qcom_dma_heaps-$(CONFIG_QCOM_DMABUF_HEAPS_SYSTEM_SECURE) += qcom_secure_system_heap.o \

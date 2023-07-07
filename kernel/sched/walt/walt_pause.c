@@ -6,6 +6,10 @@
 #include <linux/cpu.h>
 #include <linux/cpumask.h>
 
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_TASK_SCHED)
+#include <../kernel/oplus_cpu/sched/task_sched/task_sched_info.h>
+#endif
+
 #ifdef CONFIG_HOTPLUG_CPU
 
 static DEFINE_MUTEX(pause_lock);
@@ -70,8 +74,15 @@ int walt_pause_cpus(struct cpumask *cpus)
 	if (ret < 0)
 		pr_debug("pause_cpus failure ret=%d cpus=%*pbl\n", ret,
 			 cpumask_pr_args(&requested_cpus));
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_TASK_SCHED)
+	else {
+		update_ref_counts(&requested_cpus, true);
+		update_cpus_isolate_info(cpus, cpu_isolate);
+	}
+#else
 	else
 		update_ref_counts(&requested_cpus, true);
+#endif /* IS_ENABLED(CONFIG_OPLUS_FEATURE_TASK_SCHED) */
 unlock:
 	mutex_unlock(&pause_lock);
 
@@ -102,6 +113,10 @@ int walt_resume_cpus(struct cpumask *cpus)
 		/* restore/increment ref counts in case of error */
 		update_ref_counts(&requested_cpus, true);
 	}
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_TASK_SCHED)
+	else
+		update_cpus_isolate_info(cpus, cpu_unisolate);
+#endif /* IS_ENABLED(CONFIG_OPLUS_FEATURE_TASK_SCHED) */
 unlock:
 	mutex_unlock(&pause_lock);
 

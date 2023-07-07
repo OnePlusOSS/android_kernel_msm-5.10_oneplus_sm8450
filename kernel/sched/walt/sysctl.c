@@ -42,6 +42,7 @@ unsigned int sysctl_sched_wake_up_idle[2];
 unsigned int sysctl_input_boost_ms;
 unsigned int sysctl_input_boost_freq[8];
 unsigned int sysctl_sched_boost_on_input;
+int sysctl_cluster_arr[3][15];
 
 /* sysctl nodes accesed by other files */
 unsigned int __read_mostly sysctl_sched_coloc_downmigrate_ns;
@@ -56,7 +57,8 @@ unsigned int sysctl_walt_low_latency_task_threshold; /* disabled by default */
 unsigned int sysctl_sched_conservative_pl;
 unsigned int sysctl_sched_min_task_util_for_boost = 51;
 unsigned int sysctl_sched_min_task_util_for_uclamp = 51;
-unsigned int sysctl_sched_min_task_util_for_colocation = 35;
+/* keep it to max value by default */
+unsigned int sysctl_sched_min_task_util_for_colocation = 1000;
 unsigned int sysctl_sched_many_wakeup_threshold = WALT_MANY_WAKEUP_DEFAULT;
 const int sched_user_hint_max = 1000;
 unsigned int sysctl_walt_rtg_cfs_boost_prio = 99; /* disabled by default */
@@ -68,6 +70,7 @@ unsigned int sysctl_sched_skip_sp_newly_idle_lb = 1;
 unsigned int sysctl_sched_hyst_min_coloc_ns = 80000000;
 unsigned int sysctl_sched_asymcap_boost;
 
+struct cluster_freq_relation cluster_arr[3][5];
 /* range is [1 .. INT_MAX] */
 static int sysctl_task_read_pid = 1;
 
@@ -449,7 +452,7 @@ struct ctl_table input_boost_sysctls[] = {
 		.procname	= "input_boost_freq",
 		.data		= &sysctl_input_boost_freq,
 		.maxlen		= sizeof(unsigned int) * 8,
-		.mode		= 0644,
+		.mode		= 0664,
 		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= SYSCTL_ZERO,
 		.extra2		= SYSCTL_INT_MAX,
@@ -489,7 +492,7 @@ struct ctl_table walt_table[] = {
 		.procname	= "sched_group_upmigrate",
 		.data		= &sysctl_sched_group_upmigrate_pct,
 		.maxlen		= sizeof(unsigned int),
-		.mode		= 0644,
+		.mode		= 0664,
 		.proc_handler	= walt_proc_group_thresholds_handler,
 		.extra1		= &sysctl_sched_group_downmigrate_pct,
 	},
@@ -497,7 +500,7 @@ struct ctl_table walt_table[] = {
 		.procname	= "sched_group_downmigrate",
 		.data		= &sysctl_sched_group_downmigrate_pct,
 		.maxlen		= sizeof(unsigned int),
-		.mode		= 0644,
+		.mode		= 0664,
 		.proc_handler	= walt_proc_group_thresholds_handler,
 		.extra1		= SYSCTL_ZERO,
 		.extra2		= &sysctl_sched_group_upmigrate_pct,
@@ -560,7 +563,7 @@ struct ctl_table walt_table[] = {
 		.procname	= "sched_min_task_util_for_colocation",
 		.data		= &sysctl_sched_min_task_util_for_colocation,
 		.maxlen		= sizeof(unsigned int),
-		.mode		= 0644,
+		.mode		= 0664,
 		.proc_handler	= proc_dointvec_minmax,
 		.extra1		= SYSCTL_ZERO,
 		.extra2		= &one_thousand,
@@ -864,10 +867,37 @@ struct ctl_table walt_table[] = {
 		.procname	= "sched_asymcap_boost",
 		.data		= &sysctl_sched_asymcap_boost,
 		.maxlen		= sizeof(unsigned int),
-		.mode		= 0644,
+		.mode		= 0664,
 		.proc_handler	= proc_douintvec_minmax,
 		.extra1		= SYSCTL_ZERO,
 		.extra2		= SYSCTL_ONE,
+	},
+	{
+		.procname	= "cluster0_rel",
+		.data		= sysctl_cluster_arr[0],
+		.maxlen		= sizeof(int) * 15,
+		.mode		= 0644,
+		.proc_handler	= sched_ignore_cluster_handler,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_INT_MAX,
+	},
+	{
+		.procname	= "cluster1_rel",
+		.data		= sysctl_cluster_arr[1],
+		.maxlen		= sizeof(int) * 15,
+		.mode		= 0644,
+		.proc_handler	= sched_ignore_cluster_handler,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_INT_MAX,
+	},
+	{
+		.procname	= "cluster2_rel",
+		.data		= sysctl_cluster_arr[2],
+		.maxlen		= sizeof(int) * 15,
+		.mode		= 0644,
+		.proc_handler	= sched_ignore_cluster_handler,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_INT_MAX,
 	},
 	{ }
 };
@@ -890,9 +920,9 @@ void walt_tunables(void)
 		sysctl_sched_capacity_margin_dn_pct[i] = 85; /* ~15% margin */
 	}
 
-	sysctl_sched_group_upmigrate_pct = 100;
+	sysctl_sched_group_upmigrate_pct = 400;
 
-	sysctl_sched_group_downmigrate_pct = 95;
+	sysctl_sched_group_downmigrate_pct = 380;
 
 	sysctl_sched_asym_cap_sibling_freq_match_pct = 100;
 

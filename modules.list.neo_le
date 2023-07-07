@@ -1,3 +1,4 @@
+qcom_cpu_vendor_hooks.ko
 arm_smmu.ko
 clk-dummy.ko
 clk-qcom.ko
@@ -12,6 +13,7 @@ lzo.ko
 lzo-rle.ko
 msm-geni-se.ko
 msm_geni_serial.ko
+msm_rtb.ko
 ns.ko
 phy-generic.ko
 pinctrl-msm.ko
@@ -23,6 +25,8 @@ qcom_ipc_logging.ko
 qcom-pdc.ko
 qcom_rpmh.ko
 qcom-scm.ko
+dcvs_fp.ko
+qcom-dcvs.ko
 qmi_helpers.ko
 qcom_hwspinlock.ko
 gh_msgq.ko
@@ -38,6 +42,7 @@ smem.ko
 stub-regulator.ko
 mem_buf.ko
 mem_buf_dev.ko
+sdhci-msm-scaling.ko
 cqhci.ko
 sdhci-msm.ko
 core_hang_detect.ko
@@ -52,6 +57,8 @@ tmecom-intf.ko
 qcom_aoss.ko
 clk-rpmh.ko
 qcom-cpufreq-hw.ko
+sched-walt.ko
+sched-walt-debug.ko
 llcc-qcom.ko
 msm_dma_iommu_mapping.ko
 socinfo.ko
@@ -77,3 +84,16 @@ proxy-consumer.ko
 clk-spmi-pmic-div.ko
 bq256xx_charger.ko
 minidump.ko
+bq27xxx_battery.ko
+bq27xxx_battery_i2c.ko
+cqhci-crypto-qti.ko
+crypto-qti-common.ko
+crypto-qti-hwkm.ko
+hwkm.ko
+phy-msm-snps-eusb2.ko
+phy-msm-ssusb-qmp.ko
+usb_f_diag.ko
+usb_f_qdss.ko
+repeater-i2c-eusb2.ko
+repeater.ko
+dwc3-msm.ko

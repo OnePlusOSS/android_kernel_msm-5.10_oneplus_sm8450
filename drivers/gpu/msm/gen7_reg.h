@@ -132,9 +132,17 @@
 #define GEN7_CP_BV_CHICKEN_DBG           0xada
 
 /* LPAC registers */
+#define GEN7_CP_LPAC_RB_RPTR             0xb06
+#define GEN7_CP_LPAC_RB_WPTR             0xb07
 #define GEN7_CP_LPAC_DRAW_STATE_ADDR     0xb0a
 #define GEN7_CP_LPAC_DRAW_STATE_DATA     0xb0b
 #define GEN7_CP_LPAC_ROQ_DBG_ADDR        0xb0c
+#define GEN7_CP_LPAC_IB1_BASE            0xb0d
+#define GEN7_CP_LPAC_IB1_BASE_HI         0xb0e
+#define GEN7_CP_LPAC_IB1_REM_SIZE        0xb0f
+#define GEN7_CP_LPAC_IB2_BASE            0xb10
+#define GEN7_CP_LPAC_IB2_BASE_HI         0xb11
+#define GEN7_CP_LPAC_IB2_REM_SIZE        0xb12
 #define GEN7_CP_SQE_AC_UCODE_DBG_ADDR    0xb27
 #define GEN7_CP_SQE_AC_UCODE_DBG_DATA    0xb28
 #define GEN7_CP_SQE_AC_STAT_ADDR         0xb29
@@ -144,6 +152,7 @@
 #define GEN7_CP_LPAC_ROQ_DBG_DATA        0xb35
 #define GEN7_CP_LPAC_FIFO_DBG_DATA       0xb36
 #define GEN7_CP_LPAC_FIFO_DBG_ADDR       0xb40
+#define GEN7_LPAC_RBBM_STATUS            0x5fe
 
 /* RBBM registers */
 #define GEN7_RBBM_INT_0_STATUS                   0x201
@@ -555,6 +564,31 @@
 #define GEN7_RBBM_NC_MODE_CNTL                   0x534
 #define GEN7_RBBM_SNAPSHOT_STATUS                0x535
 
+#define GEN7_RBBM_PERFCTR_UCHE_12_LO             0x584
+#define GEN7_RBBM_PERFCTR_UCHE_12_HI             0x585
+#define GEN7_RBBM_PERFCTR_UCHE_13_LO             0x586
+#define GEN7_RBBM_PERFCTR_UCHE_13_HI             0x587
+#define GEN7_RBBM_PERFCTR_UCHE_14_LO             0x588
+#define GEN7_RBBM_PERFCTR_UCHE_14_HI             0x589
+#define GEN7_RBBM_PERFCTR_UCHE_15_LO             0x58a
+#define GEN7_RBBM_PERFCTR_UCHE_15_HI             0x58b
+#define GEN7_RBBM_PERFCTR_UCHE_16_LO             0x58c
+#define GEN7_RBBM_PERFCTR_UCHE_16_HI             0x58d
+#define GEN7_RBBM_PERFCTR_UCHE_17_LO             0x58e
+#define GEN7_RBBM_PERFCTR_UCHE_17_HI             0x58f
+#define GEN7_RBBM_PERFCTR_UCHE_18_LO             0x590
+#define GEN7_RBBM_PERFCTR_UCHE_18_HI             0x591
+#define GEN7_RBBM_PERFCTR_UCHE_19_LO             0x592
+#define GEN7_RBBM_PERFCTR_UCHE_19_HI             0x593
+#define GEN7_RBBM_PERFCTR_UCHE_20_LO             0x594
+#define GEN7_RBBM_PERFCTR_UCHE_20_HI             0x595
+#define GEN7_RBBM_PERFCTR_UCHE_21_LO             0x596
+#define GEN7_RBBM_PERFCTR_UCHE_21_HI             0x597
+#define GEN7_RBBM_PERFCTR_UCHE_22_LO             0x598
+#define GEN7_RBBM_PERFCTR_UCHE_22_HI             0x599
+#define GEN7_RBBM_PERFCTR_UCHE_23_LO             0x59a
+#define GEN7_RBBM_PERFCTR_UCHE_23_HI             0x59b
+
 #define GEN7_RBBM_SECVID_TRUST_CNTL              0xf400
 #define GEN7_RBBM_SECVID_TSB_TRUSTED_BASE_LO     0xf800
 #define GEN7_RBBM_SECVID_TSB_TRUSTED_BASE_HI     0xf801
@@ -602,6 +636,7 @@
 #define GEN7_RBBM_CLOCK_DELAY_TSE_RAS_RBBM 0x00109
 #define GEN7_RBBM_CLOCK_HYST_TSE_RAS_RBBM 0x0010a
 #define GEN7_RBBM_CLOCK_CNTL_UCHE        0x0010b
+#define GEN7_RBBM_CLOCK_CNTL2_UCHE       0x0010c
 #define GEN7_RBBM_CLOCK_DELAY_UCHE       0x0010f
 #define GEN7_RBBM_CLOCK_HYST_UCHE        0x00110
 #define GEN7_RBBM_CLOCK_MODE_VFD         0x00111
@@ -617,6 +652,7 @@
 #define GEN7_RBBM_CLOCK_MODE_HLSQ        0x0011b
 #define GEN7_RBBM_CLOCK_DELAY_HLSQ       0x0011c
 #define GEN7_RBBM_CLOCK_HYST_HLSQ        0x0011d
+#define GEN7_RBBM_CLOCK_HYST2_VFD        0x0012f
 #define GEN7_RBBM_CLOCK_MODE_CP          0x00260
 #define GEN7_RBBM_CLOCK_MODE_BV_LRZ      0x00284
 #define GEN7_RBBM_CLOCK_MODE_BV_GRAS     0x00285
@@ -806,6 +842,18 @@
 #define GEN7_UCHE_PERFCTR_UCHE_SEL_11       0xe27
 #define GEN7_UCHE_GBIF_GX_CONFIG            0xe3a
 #define GEN7_UCHE_CMDQ_CONFIG               0xe3c
+#define GEN7_UCHE_PERFCTR_UCHE_SEL_12       0xe40
+#define GEN7_UCHE_PERFCTR_UCHE_SEL_13       0xe41
+#define GEN7_UCHE_PERFCTR_UCHE_SEL_14       0xe42
+#define GEN7_UCHE_PERFCTR_UCHE_SEL_15       0xe43
+#define GEN7_UCHE_PERFCTR_UCHE_SEL_16       0xe44
+#define GEN7_UCHE_PERFCTR_UCHE_SEL_17       0xe45
+#define GEN7_UCHE_PERFCTR_UCHE_SEL_18       0xe46
+#define GEN7_UCHE_PERFCTR_UCHE_SEL_19       0xe47
+#define GEN7_UCHE_PERFCTR_UCHE_SEL_20       0xe48
+#define GEN7_UCHE_PERFCTR_UCHE_SEL_21       0xe49
+#define GEN7_UCHE_PERFCTR_UCHE_SEL_22       0xe4a
+#define GEN7_UCHE_PERFCTR_UCHE_SEL_23       0xe4b
 
 /* SP registers */
 #define GEN7_SP_NC_MODE_CNTL                0xae02
@@ -997,6 +1045,8 @@
 #define GEN7_CX_DBGC_PERF_ATB_DRAIN_CMD                 0x1844a
 #define GEN7_CX_DBGC_ECO_CNTL                           0x18450
 #define GEN7_CX_DBGC_AHB_DBG_CNTL                       0x18451
+#define GEN7_CX_DBGC_TCM_DBG_ADDR                       0x18580
+#define GEN7_CX_DBGC_TCM_DBG_DATA                       0x18581
 
 /* GMU control registers */
 #define GEN7_GMU_CM3_ITCM_START			0x1b400
@@ -1012,6 +1062,7 @@
 #define GEN7_GMU_ICACHE_CONFIG			0x1f400
 #define GEN7_GMU_DCACHE_CONFIG			0x1f401
 #define GEN7_GMU_SYS_BUS_CONFIG			0x1f40f
+#define GEN7_GMU_CX_MRC_GBIF_QOS_CTRL		0x1f50b
 #define GEN7_GMU_CM3_SYSRESET			0x1f800
 #define GEN7_GMU_CM3_BOOT_CONFIG		0x1f801
 #define GEN7_GMU_CX_GMU_WFI_CONFIG		0x1f802
@@ -1047,6 +1098,9 @@
 #define GEN7_GMU_CX_GMU_POWER_COUNTER_XOCLK_8_H	0x1f875
 #define GEN7_GMU_CX_GMU_POWER_COUNTER_XOCLK_9_L	0x1f876
 #define GEN7_GMU_CX_GMU_POWER_COUNTER_XOCLK_9_H	0x1f877
+#define GEN7_GMU_CX_GMU_POWER_COUNTER_XOCLK_10_L	0x1f878
+#define GEN7_GMU_CX_GMU_POWER_COUNTER_XOCLK_10_H	0x1f879
+#define GEN7_GMU_CX_GMU_POWER_COUNTER_SELECT_3	0x1f87f
 #define GEN7_GMU_CX_GMU_ALWAYS_ON_COUNTER_L	0x1f888
 #define GEN7_GMU_CX_GMU_ALWAYS_ON_COUNTER_H	0x1f889
 #define GEN7_GMU_PWR_COL_INTER_FRAME_CTRL	0x1f8c0
@@ -1121,6 +1175,7 @@
 #define GEN7_GMU_AHB_FENCE_STATUS_CLR		0x23b14
 #define GEN7_GMU_RBBM_INT_UNMASKED_STATUS	0x23b15
 #define GEN7_GMU_AO_SPARE_CNTL			0x23b16
+#define GEN7_GPU_GMU_AO_GPU_LPAC_BUSY_STATUS	0x23b30
 
 /* GMU RSC control registers */
 #define GEN7_GMU_RSCC_CONTROL_REQ		0x23b07
@@ -1152,6 +1207,13 @@
 #define GEN7_RSCC_TCS1_DRV0_STATUS			0x003ee
 #define GEN7_RSCC_TCS2_DRV0_STATUS			0x00496
 #define GEN7_RSCC_TCS3_DRV0_STATUS			0x0053e
+
+/* Device-specific RSCC registers */
+#define GEN7_6_0_RSCC_SEQ_MEM_0_DRV0			0x00154
+#define GEN7_6_0_RSCC_TCS0_DRV0_STATUS			0x0034a
+#define GEN7_6_0_RSCC_TCS1_DRV0_STATUS			0x003f2
+#define GEN7_6_0_RSCC_TCS2_DRV0_STATUS			0x0049a
+#define GEN7_6_0_RSCC_TCS3_DRV0_STATUS			0x00542
 
 /* GPU PDC sequencer registers in AOSS.RPMh domain */
 #define GEN7_PDC_GPU_ENABLE_PDC				0x1140

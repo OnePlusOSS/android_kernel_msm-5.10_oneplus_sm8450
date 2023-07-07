@@ -14,6 +14,7 @@
 #include <linux/usb/ucsi_glink.h>
 #include <linux/pinctrl/consumer.h>
 #include <linux/of_gpio.h>
+#include <linux/regulator/consumer.h>
 #include <linux/usb/redriver.h>
 
 /* priority: INT_MAX >= x >= 0 */
@@ -60,11 +61,6 @@
 #define CHNC_INDEX		2
 #define CHND_INDEX		3
 
-enum plug_orientation {
-	ORIENTATION_CC1,
-	ORIENTATION_CC2,
-};
-
 enum operation_mode {
 	OP_MODE_NONE,		/* 4 lanes disabled */
 	OP_MODE_USB,		/* 2 lanes for USB and 2 lanes disabled */
@@ -79,10 +75,15 @@ enum operation_mode {
 
 #define CHAN_MODE_DISABLE	0xff /* when disable, not configure eq, gain ... */
 
+#define CHIP_MAX_PWR_UA		260000
+#define CHIP_MIN_PWR_UV		1710000
+#define CHIP_MAX_PWR_UV		1890000
+
 struct ssusb_redriver {
 	struct device		*dev;
 	struct regmap		*regmap;
 	struct i2c_client	*client;
+	struct regulator	*vdd;
 
 	int orientation_gpio;
 	enum plug_orientation typec_orientation;
@@ -99,6 +100,7 @@ struct ssusb_redriver {
 
 	u8	gen_dev_val;
 	bool	lane_channel_swap;
+	bool	vdd_enable;
 
 	struct workqueue_struct *pullup_wq;
 	struct work_struct	pullup_work;
@@ -139,6 +141,30 @@ static int redriver_i2c_reg_set(struct ssusb_redriver *redriver,
 	return 0;
 }
 
+static void redriver_vdd_enable(struct ssusb_redriver *redriver, bool on)
+{
+	int l, v, s;
+
+	if (!redriver->vdd || redriver->op_mode != OP_MODE_NONE) {
+		dev_dbg(redriver->dev, "no vdd regulator operation\n");
+		return;
+	}
+
+	if (on && !redriver->vdd_enable) {
+		redriver->vdd_enable = true;
+		l = regulator_set_load(redriver->vdd, CHIP_MAX_PWR_UA);
+		v = regulator_set_voltage(redriver->vdd, CHIP_MIN_PWR_UV, CHIP_MAX_PWR_UV);
+		s = regulator_enable(redriver->vdd);
+		dev_dbg(redriver->dev, "vdd regulator enable return %d-%d-%d\n", l, v, s);
+	} else if (!on && redriver->vdd_enable) {
+		redriver->vdd_enable = false;
+		s = regulator_disable(redriver->vdd);
+		v = regulator_set_voltage(redriver->vdd, 0, CHIP_MAX_PWR_UV);
+		l = regulator_set_load(redriver->vdd, 0);
+		dev_dbg(redriver->dev, "vdd regulator disable return %d-%d-%d\n", l, v, s);
+	}
+}
+
 static int ssusb_redriver_gen_dev_set(struct ssusb_redriver *redriver)
 {
 	u8 val = 0;
@@ -158,8 +184,7 @@ static int ssusb_redriver_gen_dev_set(struct ssusb_redriver *redriver)
 			/* Enable channel C and D */
 			val &= ~(CHNA_EN | CHNB_EN);
 			val |= (CHNC_EN | CHND_EN);
-		} else if (redriver->typec_orientation
-				== ORIENTATION_CC2) {
+		} else {
 			/* Enable channel A and B*/
 			val |= (CHNA_EN | CHNB_EN);
 			val &= ~(CHNC_EN | CHND_EN);
@@ -187,10 +212,7 @@ static int ssusb_redriver_gen_dev_set(struct ssusb_redriver *redriver)
 		if (redriver->typec_orientation
 				== ORIENTATION_CC1)
 			val |= (0x1 << OP_MODE_SHIFT);
-		else if (redriver->typec_orientation
-				== ORIENTATION_CC2)
-			val |= (0x0 << OP_MODE_SHIFT);
-
+		/* it is mode 0 when ORIENTATION_CC2 */
 		break;
 	default:
 		val &= ~CHIP_EN;
@@ -503,6 +525,12 @@ static int ssusb_redriver_ucsi_notifier(struct notifier_block *nb,
 	if (redriver->op_mode == op_mode)
 		return NOTIFY_OK;
 
+	/*
+	 * if regulator was turn off during disocnnect, when connect and turn on regulator,
+	 * it will enter default 4 lanes USB mode which is different from behavior that
+	 * regulator always on.
+	 */
+	redriver_vdd_enable(redriver, true);
 	dev_dbg(redriver->dev, "op mode %s -> %s\n",
 		OPMODESTR(redriver->op_mode), OPMODESTR(op_mode));
 	redriver->op_mode = op_mode;
@@ -523,10 +551,12 @@ static int ssusb_redriver_ucsi_notifier(struct notifier_block *nb,
 	}
 	ssusb_redriver_gen_dev_set(redriver);
 
+	redriver_vdd_enable(redriver, false);
+
 	return NOTIFY_OK;
 }
 
-int redriver_notify_connect(struct device_node *node)
+int redriver_notify_connect(struct device_node *node, enum plug_orientation orientation)
 {
 	struct ssusb_redriver *redriver;
 
@@ -538,18 +568,24 @@ int redriver_notify_connect(struct device_node *node)
 	    (redriver->op_mode == OP_MODE_DP))
 		return 0;
 
-	/* if ucsi ppm can't return status with Connector Partner Changed
-	 * bit set, redriver will not process the notification,
-	 * but ucsi still start usb host/device mode,
-	 * then redriver stay in disabled state, super speed (plus)
-	 * will not work.
-	 * fix should come from ucsi ppm, it is a enhancement here.
-	 * TODO: redriver controlled by dwc3, remove ucsi notification
-	 */
-	if (redriver->op_mode == OP_MODE_NONE) {
-		redriver->op_mode = OP_MODE_USB;
+	dev_dbg(redriver->dev, "orientation %d\n", orientation);
+
+	if (orientation != ORIENTATION_UNKNOWN) {
+		if (redriver->lane_channel_swap) {
+			redriver->typec_orientation =
+				orientation == ORIENTATION_CC1 ? ORIENTATION_CC2 : ORIENTATION_CC1;
+		} else {
+			redriver->typec_orientation = orientation;
+		}
+	} else if (redriver->op_mode == OP_MODE_NONE) {
 		ssusb_redriver_read_orientation(redriver);
 	}
+
+	redriver_vdd_enable(redriver, true);
+
+	if (redriver->op_mode == OP_MODE_NONE)
+		redriver->op_mode = OP_MODE_USB;
+
 	dev_dbg(redriver->dev, "connect op mode %s\n",
 		OPMODESTR(redriver->op_mode));
 
@@ -585,6 +621,8 @@ int redriver_notify_disconnect(struct device_node *node)
 
 	redriver_i2c_reg_set(redriver, GEN_DEV_SET_REG, 0);
 
+	redriver_vdd_enable(redriver, false);
+
 	return 0;
 }
 EXPORT_SYMBOL(redriver_notify_disconnect);
@@ -599,6 +637,8 @@ int redriver_release_usb_lanes(struct device_node *node)
 
 	if (redriver->op_mode == OP_MODE_DP)
 		return 0;
+
+	redriver_vdd_enable(redriver, true);
 
 	dev_dbg(redriver->dev, "display notify 4 lane mode\n");
 	redriver->op_mode = OP_MODE_DP;
@@ -768,6 +808,14 @@ static int redriver_i2c_probe(struct i2c_client *client,
 		return ret;
 	}
 
+	redriver->vdd = devm_regulator_get_optional(&client->dev, "vdd");
+	if (IS_ERR(redriver->vdd)) {
+		ret = PTR_ERR(redriver->vdd);
+		redriver->vdd = NULL;
+		if (ret != -ENODEV)
+			dev_err(&client->dev, "Failed to get vdd regulator %d\n", ret);
+	}
+
 	INIT_WORK(&redriver->pullup_work, redriver_gadget_pullup_work);
 	INIT_WORK(&redriver->host_work, redriver_host_work);
 
@@ -775,7 +823,15 @@ static int redriver_i2c_probe(struct i2c_client *client,
 	    of_property_read_bool(redriver->dev->of_node, "lane-channel-swap");
 
 	redriver->op_mode = OP_MODE_NONE;
+	redriver_vdd_enable(redriver, true);
 	ssusb_redriver_gen_dev_set(redriver);
+	/* when private vdd present and change to none mode, it can simply disable vdd regulator,
+	 * but to keep things simple and avoid if/else operation, keep one same rule as,
+	 * allow original register write operation then control vdd regulator.
+	 * also it will keep consistent behavior if it still need vdd control when multiple
+	 * clients share the same vdd regulator.
+	 */
+	redriver_vdd_enable(redriver, false);
 
 	ssusb_redriver_orientation_gpio_init(redriver);
 
@@ -795,6 +851,9 @@ static int redriver_i2c_remove(struct i2c_client *client)
 	unregister_ucsi_glink_notifier(&redriver->ucsi_nb);
 	redriver->work_ongoing = false;
 	destroy_workqueue(redriver->pullup_wq);
+
+	if (redriver->vdd)
+		regulator_disable(redriver->vdd);
 
 	return 0;
 }

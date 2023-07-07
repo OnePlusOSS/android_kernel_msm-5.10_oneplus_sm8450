@@ -5,6 +5,7 @@
  * Copyright (C) 2016 Linaro Ltd
  * Copyright (C) 2014 Sony Mobile Communications AB
  * Copyright (c) 2012-2013, 2020-2021, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2022 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <linux/clk.h>
@@ -14,6 +15,8 @@
 #include <linux/module.h>
 #include <linux/of_address.h>
 #include <linux/of_device.h>
+#include <linux/of_reserved_mem.h>
+#include <linux/dma-mapping.h>
 #include <linux/platform_device.h>
 #include <linux/pm_domain.h>
 #include <linux/pm_runtime.h>
@@ -26,21 +29,75 @@
 #include <linux/soc/qcom/smem_state.h>
 #include <linux/soc/qcom/qcom_aoss.h>
 #include <trace/events/rproc_qcom.h>
+#include <soc/qcom/qcom_ramdump.h>
 
 #include "qcom_common.h"
 #include "qcom_pil_info.h"
 #include "qcom_q6v5.h"
 #include "remoteproc_internal.h"
 
+#ifdef OPLUS_FEATURE_MODEM_MINIDUMP
+#include <net/genetlink.h>
+#include <linux/netlink.h>
+#include <linux/soc/qcom/smem.h>
+#endif /* OPLUS_FEATURE_MODEM_MINIDUMP */
+
+
 #define XO_FREQ		19200000
 #define PIL_TZ_AVG_BW	0
 #define PIL_TZ_PEAK_BW	UINT_MAX
 #define QMP_MSG_LEN	64
 
+#ifdef OPLUS_FEATURE_MODEM_MINIDUMP
+#define MODEM_MINIDUMP_ID                       3
+#define OPLUS_MODEM_MINIDUMP_FAMILY_VERSION     1
+#define OPLUS_MODEM_MINIDUMP_FAMILY_NAME        "md_netlink"
+#define NLA_DATA(na)                            ((char *)((char*)(na) + NLA_HDRLEN))
+#define SBL_MINIDUMP_SMEM_ID                    602
+#define MAX_NUM_OF_SS                           10
+
+
+/**
+ * struct minidump_subsystem_toc: Subsystem's SMEM Table of content
+ * @status : Subsystem toc init status
+ * @enabled : if set to 1, this region would be copied during coredump
+ * @encryption_status: Encryption status for this subsystem
+ * @encryption_required : Decides to encrypt the subsystem regions or not
+ * @region_count : Number of regions added in this subsystem toc
+ * @regions_baseptr : regions base pointer of the subsystem
+ */
+typedef struct minidump_subsystem {
+	__le32	status;
+	__le32	enabled;
+	__le32	encryption_status;
+	__le32	encryption_required;
+	__le32	region_count;
+	__le64	regions_baseptr;
+}minidump_subsystem_type;
+
+
+/**
+ * struct minidump_global_toc: Global Table of Content
+ * @status : Global Minidump init status
+ * @md_revision : Minidump revision
+ * @enabled : Minidump enable status
+ * @subsystems : Array of subsystems toc
+ */
+typedef struct minidump_global_toc {
+	__le32				status;
+	__le32				md_revision;
+	__le32				enabled;
+	struct minidump_subsystem	subsystems[MAX_NUM_OF_SS];
+}minidump_global_toc_type;
+
+#endif /* OPLUS_FEATURE_MODEM_MINIDUMP */
+
+
 static struct icc_path *scm_perf_client;
 static int scm_pas_bw_count;
 static DEFINE_MUTEX(scm_pas_bw_mutex);
 bool timeout_disabled;
+extern char stackup_pcb_absent_status[];
 
 struct adsp_data {
 	int crash_reason_smem;
@@ -64,6 +121,7 @@ struct adsp_data {
 
 struct qcom_adsp {
 	struct device *dev;
+	struct device *minidump_dev;
 	struct rproc *rproc;
 
 	struct qcom_q6v5 q6v5;
@@ -106,6 +164,216 @@ struct qcom_adsp {
 	struct qcom_sysmon *sysmon;
 };
 
+
+#ifdef OPLUS_FEATURE_MODEM_MINIDUMP
+static u32 oplus_modem_minidump_user_pid = 0;
+struct minidump_subsystem modem_minidump_toc;
+
+enum oplus_modem_minidump_msg_type_et{
+	OPLUS_MODEM_MINIDUMP_MSG_INDICATION_DUMP_TYPE,
+	__OPLUS_MODEM_MINIDUMP_MSG_MAX,
+};
+
+#define OPLUS_MODEM_MINIDUMP_MSG_MAX (__OPLUS_MODEM_MINIDUMP_MSG_MAX - 1)
+
+enum oplus_modem_minidump_cmd_type_et{
+	OPLUS_MODEM_MINIDUMP_CMD_INDICATION_DUMP_TYPE,
+	__OPLUS_MODEM_MINIDUMP_CMD_MAX,
+};
+
+#define OPLUS_MODEM_MINIDUMP_CMD_MAX (__OPLUS_MODEM_MINIDUMP_CMD_MAX - 1)
+
+
+static int oplus_modem_minidump_netlink_rcv_msg(struct sk_buff *skb, struct genl_info *info);
+static void get_modem_minidump_toc(struct minidump_subsystem *subsys_toc);
+static int oplus_modem_minidump_send_netlink_msg(int msg_type, char *payload, int payload_len);
+
+
+static const struct genl_ops oplus_modem_minidump_genl_ops[] =
+{
+	{
+		.cmd = OPLUS_MODEM_MINIDUMP_CMD_INDICATION_DUMP_TYPE,
+		.flags = 0,
+		.doit = oplus_modem_minidump_netlink_rcv_msg,
+		.dumpit = NULL,
+	},
+};
+
+
+static struct genl_family oplus_modem_minidump_genl_family =
+{
+	.id = 0,
+	.hdrsize = 0,
+	.name = OPLUS_MODEM_MINIDUMP_FAMILY_NAME,
+	.version = OPLUS_MODEM_MINIDUMP_FAMILY_VERSION,
+	.maxattr = OPLUS_MODEM_MINIDUMP_MSG_MAX,
+	.ops = oplus_modem_minidump_genl_ops,
+	.n_ops = ARRAY_SIZE(oplus_modem_minidump_genl_ops),
+};
+
+
+static void oplus_modem_minidump_indication_dump_type(struct nlattr *nla)
+{
+	//u32 *data = (u32*)NLA_DATA(nla);
+	printk("[oplus_modem_minidump]:oplus_modem_minidump_indication_dump_type enter");
+	get_modem_minidump_toc(&modem_minidump_toc);
+	oplus_modem_minidump_send_netlink_msg(OPLUS_MODEM_MINIDUMP_MSG_INDICATION_DUMP_TYPE, (char *)(&modem_minidump_toc), sizeof(minidump_subsystem_type));
+	return;
+}
+
+
+static int oplus_modem_minidump_netlink_rcv_msg(struct sk_buff *skb, struct genl_info *info) {
+	int ret = 0;
+	struct nlmsghdr *nlhdr;
+	struct genlmsghdr *genlhdr;
+	struct nlattr *nla;
+
+	nlhdr = nlmsg_hdr(skb);
+	genlhdr = nlmsg_data(nlhdr);
+	nla = genlmsg_data(genlhdr);
+
+	if (oplus_modem_minidump_user_pid == 0) {
+		oplus_modem_minidump_user_pid = nlhdr->nlmsg_pid;
+		printk("[oplus_modem_minidump]:set oplus_modem_minidump_user_pid = %u.\n", oplus_modem_minidump_user_pid);
+	}
+
+	/* to do: may need to some head check here*/
+	printk("[oplus_modem_minidump]:oplus_modem_minidump_netlink_rcv_msg type = %u.\n", nla->nla_type);
+
+	switch (nla->nla_type) {
+	case OPLUS_MODEM_MINIDUMP_MSG_INDICATION_DUMP_TYPE:
+		oplus_modem_minidump_indication_dump_type(nla);
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	return ret;
+}
+
+
+static inline int genl_msg_prepare_usr_msg(u8 cmd, size_t size, pid_t pid, struct sk_buff **skbp)
+{
+	struct sk_buff *skb;
+	/* create a new netlink msg */
+	skb = genlmsg_new(size, GFP_ATOMIC);
+	if (skb == NULL) {
+		return -ENOMEM;
+	}
+
+	/* Add a new netlink message to an skb */
+	genlmsg_put(skb, pid, 0, &oplus_modem_minidump_genl_family, 0, cmd);
+	*skbp = skb;
+	return 0;
+}
+
+
+static inline int genl_msg_mk_usr_msg(struct sk_buff *skb, int type, void *data, int len)
+{
+	int ret;
+	/* add a netlink attribute to a socket buffer */
+	if ((ret = nla_put(skb, type, len, data)) != 0) {
+		return ret;
+	}
+
+	return 0;
+}
+
+
+/* send to user space */
+static int oplus_modem_minidump_send_netlink_msg(int msg_type, char *payload, int payload_len) {
+	int ret = 0;
+	void * head;
+	struct sk_buff *skbuff;
+	size_t size;
+
+	printk("[oplus_modem_minidump]:oplus_modem_minidump_send_netlink_msg enter");
+
+	if (!oplus_modem_minidump_user_pid) {
+		printk("[oplus_modem_minidump]: oplus_modem_minidump_send_netlink_msg, oplus_modem_minidump_user_pid = 0\n");
+		return -1;
+	}
+
+	/* allocate new buffer cache */
+	size = nla_total_size(payload_len);
+	ret = genl_msg_prepare_usr_msg(OPLUS_MODEM_MINIDUMP_CMD_INDICATION_DUMP_TYPE, size, oplus_modem_minidump_user_pid, &skbuff);
+	if (ret) {
+		return ret;
+	}
+
+	ret = genl_msg_mk_usr_msg(skbuff, msg_type, payload, payload_len);
+	if (ret) {
+		kfree_skb(skbuff);
+		return ret;
+	}
+
+	head = genlmsg_data(nlmsg_data(nlmsg_hdr(skbuff)));
+	genlmsg_end(skbuff, head);
+
+	/* send data */
+	ret = genlmsg_unicast(&init_net, skbuff, oplus_modem_minidump_user_pid);
+	if(ret < 0) {
+		printk("[oplus_modem_minidump]:oplus_modem_minidump_send_netlink_msg error, ret = %d\n", ret);
+		return -1;
+	}
+
+	return 0;
+}
+
+
+static int oplus_modem_minidump_netlink_init(void)
+{
+	int ret;
+	ret = genl_register_family(&oplus_modem_minidump_genl_family);
+	if (ret) {
+		printk("[oplus_modem_minidump]:genl_register_family:%s failed,ret = %d\n", OPLUS_MODEM_MINIDUMP_FAMILY_NAME, ret);
+		return ret;
+	} else {
+		printk("[oplus_modem_minidump]:genl_register_family complete, id = %d!\n", oplus_modem_minidump_genl_family.id);
+	}
+
+	return 0;
+}
+
+static void oplus_modem_minidump_netlink_exit(void)
+{
+	genl_unregister_family(&oplus_modem_minidump_genl_family);
+}
+
+static void get_modem_minidump_toc(struct minidump_subsystem *subsys_toc) {
+	minidump_global_toc_type *md_toc;
+	minidump_subsystem_type *subsystem;
+
+	printk("[oplus_modem_minidump]:get_modem_minidump_toc enter");
+	if (subsys_toc == NULL) {
+		printk("[oplus_modem_minidump]: get_modem_minidump_toc failed, subsys_toc == NULL\n");
+	}
+
+	/* Get Global minidump ToC*/
+	md_toc = qcom_smem_get(QCOM_SMEM_HOST_ANY, SBL_MINIDUMP_SMEM_ID, NULL);
+	if (IS_ERR(md_toc)) {
+		printk("[oplus_modem_minidump]: Minidump TOC not found in SMEM\n");
+		return;
+	}
+
+	/* Get subsystem table of contents using the minidump id */
+	subsystem = &(md_toc->subsystems[MODEM_MINIDUMP_ID]);
+	printk("[oplus_modem_minidump]: modem subsystem->status is 0x%x\n", (unsigned int)le32_to_cpu(subsystem->status));
+	printk("[oplus_modem_minidump]: modem subsystem->enabled is 0x%x\n",(unsigned int)le32_to_cpu(subsystem->enabled));
+	printk("[oplus_modem_minidump]: modem subsystem->regions_baseptr is 0x%x\n",(unsigned int)subsystem->regions_baseptr);
+
+	memset(subsys_toc, 0, sizeof(minidump_subsystem_type));
+	memcpy(subsys_toc, subsystem, sizeof(minidump_subsystem_type));
+
+	printk("[oplus_modem_minidump]: modem subsys_toc->status is 0x%x\n", (unsigned int)le32_to_cpu(subsystem->status));
+	printk("[oplus_modem_minidump]: modem subsys_toc->enabled is 0x%x\n",(unsigned int)le32_to_cpu(subsystem->enabled));
+	printk("[oplus_modem_minidump]: modem subsys_toc->regions_baseptr is 0x%x\n",(unsigned int)subsystem->regions_baseptr);
+
+	return;
+}
+
+#endif /* OPLUS_FEATURE_MODEM_MINIDUMP */
+
 static ssize_t txn_id_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct platform_device *pdev = container_of(dev, struct platform_device, dev);
@@ -142,7 +410,7 @@ static void adsp_minidump(struct rproc *rproc)
 	if (rproc->dump_conf == RPROC_COREDUMP_DISABLED)
 		goto exit;
 
-	qcom_minidump(rproc, adsp->minidump_id, adsp_segment_dump);
+	qcom_minidump(rproc, adsp->minidump_dev, adsp->minidump_id, adsp_segment_dump);
 
 exit:
 	trace_rproc_qcom_event(dev_name(adsp->dev), "adsp_minidump", "exit");
@@ -386,10 +654,12 @@ static int adsp_start(struct rproc *rproc)
 		goto disable_aggre2_clk;
 
 	scm_pas_enable_bw();
+	trace_rproc_qcom_event(dev_name(adsp->dev), "Q6_auth_reset", "enter");
 	ret = qcom_scm_pas_auth_and_reset(adsp->pas_id);
 	if (ret)
 		panic("Panicking, auth and reset failed for remoteproc %s\n", rproc->name);
 	scm_pas_disable_bw();
+	trace_rproc_qcom_event(dev_name(adsp->dev), "Q6_auth_reset", "exit");
 
 	if (!timeout_disabled) {
 		ret = qcom_q6v5_wait_for_start(&adsp->q6v5, msecs_to_jiffies(5000));
@@ -459,6 +729,7 @@ static int adsp_stop(struct rproc *rproc)
 		panic("Panicking, remoteproc %s failed to shutdown.\n", rproc->name);
 
 	scm_pas_disable_bw();
+
 	adsp_pds_disable(adsp, adsp->active_pds, adsp->active_pd_count);
 	adsp_toggle_load_state(adsp->qmp, adsp->qmp_name, false);
 	handover = qcom_q6v5_unprepare(&adsp->q6v5);
@@ -688,6 +959,28 @@ static int adsp_alloc_memory_region(struct qcom_adsp *adsp)
 }
 
 
+static int adsp_setup_32b_dma_allocs(struct qcom_adsp *adsp)
+{
+	int ret;
+
+	if (!adsp->dma_phys_below_32b)
+		return 0;
+
+	ret = of_reserved_mem_device_init_by_idx(adsp->dev, adsp->dev->of_node, 1);
+	if (ret) {
+		dev_err(adsp->dev,
+			"Unable to get the CMA area for performing dma_alloc_* calls\n");
+		goto out;
+	}
+
+	ret = dma_set_mask_and_coherent(adsp->dev, DMA_BIT_MASK(32));
+	if (ret)
+		dev_err(adsp->dev, "Unable to set the coherent mask to 32-bits!\n");
+
+out:
+	return ret;
+}
+
 static int adsp_probe(struct platform_device *pdev)
 {
 	const struct adsp_data *desc;
@@ -695,6 +988,7 @@ static int adsp_probe(struct platform_device *pdev)
 	struct rproc *rproc;
 	const char *fw_name;
 	const struct rproc_ops *ops = &adsp_ops;
+	char md_dev_name[32];
 	int ret;
 
 	desc = of_device_get_match_data(&pdev->dev);
@@ -713,14 +1007,26 @@ static int adsp_probe(struct platform_device *pdev)
 	if (desc->minidump_id)
 		ops = &adsp_minidump_ops;
 
-	rproc = rproc_alloc(&pdev->dev, pdev->name, ops, fw_name, sizeof(*adsp));
+#ifdef OPLUS_FEATURE_MODEM_MINIDUMP
+	if (desc->minidump_id == 3) { /* modem minidump id == 3 */
+		printk("[oplus_modem_minidump]:adsp_probe desc->minidump_id == 3");
+		oplus_modem_minidump_netlink_init();
+	}
+#endif /* OPLUS_FEATURE_MODEM_MINIDUMP */
 
+	rproc = rproc_alloc(&pdev->dev, pdev->name, ops, fw_name, sizeof(*adsp));
 	if (!rproc) {
 		dev_err(&pdev->dev, "unable to allocate remoteproc\n");
 		return -ENOMEM;
 	}
 
-	rproc->recovery_disabled = true;
+	if (strcmp(stackup_pcb_absent_status, "1") == 0) {
+		dev_err(&pdev->dev, "stackup_pcb_absent_status = 1, enable SSR\n");
+		rproc->recovery_disabled = false;
+	}
+	else {
+		rproc->recovery_disabled = true;
+	}
 	rproc->auto_boot = desc->auto_boot;
 	if (desc->uses_elf64)
 		rproc_coredump_set_elf_info(rproc, ELFCLASS64, EM_NONE);
@@ -748,6 +1054,10 @@ static int adsp_probe(struct platform_device *pdev)
 		goto free_rproc;
 
 	ret = adsp_alloc_memory_region(adsp);
+	if (ret)
+		goto deinit_wakeup_source;
+
+	ret = adsp_setup_32b_dma_allocs(adsp);
 	if (ret)
 		goto deinit_wakeup_source;
 
@@ -796,16 +1106,26 @@ static int adsp_probe(struct platform_device *pdev)
 		goto detach_proxy_pds;
 	}
 
+	qcom_sysmon_register_ssr_subdev(adsp->sysmon, &adsp->ssr_subdev.subdev);
 	ret = device_create_file(adsp->dev, &dev_attr_txn_id);
 	if (ret)
 		goto remove_subdevs;
 
+	snprintf(md_dev_name, ARRAY_SIZE(md_dev_name), "%s-md", pdev->dev.of_node->name);
+	adsp->minidump_dev = qcom_create_ramdump_device(md_dev_name, NULL);
+	if (!adsp->minidump_dev)
+		dev_err(&pdev->dev, "Unable to create %s minidump device.\n", md_dev_name);
+
 	ret = rproc_add(rproc);
 	if (ret)
-		goto remove_attr_txn_id;
+		goto destroy_minidump_dev;
 
 	return 0;
-remove_attr_txn_id:
+
+destroy_minidump_dev:
+	if (adsp->minidump_dev)
+		qcom_destroy_ramdump_device(adsp->minidump_dev);
+
 	device_remove_file(adsp->dev, &dev_attr_txn_id);
 remove_subdevs:
 	qcom_remove_sysmon_subdev(adsp->sysmon);
@@ -826,6 +1146,8 @@ static int adsp_remove(struct platform_device *pdev)
 	struct qcom_adsp *adsp = platform_get_drvdata(pdev);
 
 	rproc_del(adsp->rproc);
+	if (adsp->minidump_dev)
+		qcom_destroy_ramdump_device(adsp->minidump_dev);
 	device_remove_file(adsp->dev, &dev_attr_txn_id);
 	qcom_remove_glink_subdev(adsp->rproc, &adsp->glink_subdev);
 	qcom_remove_sysmon_subdev(adsp->sysmon);
@@ -833,6 +1155,10 @@ static int adsp_remove(struct platform_device *pdev)
 	qcom_remove_ssr_subdev(adsp->rproc, &adsp->ssr_subdev);
 	device_init_wakeup(adsp->dev, false);
 	rproc_free(adsp->rproc);
+
+#ifdef OPLUS_FEATURE_MODEM_MINIDUMP
+	oplus_modem_minidump_netlink_exit();
+#endif /* OPLUS_FEATURE_MODEM_MINIDUMP */
 
 	return 0;
 }
@@ -915,6 +1241,20 @@ static const struct adsp_data neo_adsp_resource = {
 	.ssctl_id = 0x14,
 };
 
+static const struct adsp_data anorak_adsp_resource = {
+	.crash_reason_smem = 423,
+	.firmware_name = "adsp.mdt",
+	.pas_id = 1,
+	.minidump_id = 5,
+	.uses_elf64 = true,
+	.has_aggre2_clk = false,
+	.auto_boot = false,
+	.ssr_name = "lpass",
+	.sysmon_name = "adsp",
+	.qmp_name = "adsp",
+	.ssctl_id = 0x14,
+};
+
 static const struct adsp_data diwali_adsp_resource = {
 	.crash_reason_smem = 423,
 	.firmware_name = "adsp.mdt",
@@ -970,6 +1310,20 @@ static const struct adsp_data msm8998_adsp_resource = {
 		.ssr_name = "lpass",
 		.sysmon_name = "adsp",
 		.ssctl_id = 0x14,
+};
+
+static const struct adsp_data ravelin_adsp_resource = {
+	.crash_reason_smem = 423,
+	.firmware_name = "adsp.mdt",
+	.pas_id = 1,
+	.minidump_id = 5,
+	.uses_elf64 = true,
+	.has_aggre2_clk = false,
+	.auto_boot = false,
+	.ssr_name = "lpass",
+	.sysmon_name = "adsp",
+	.qmp_name = "adsp",
+	.ssctl_id = 0x14,
 };
 
 static const struct adsp_data cdsp_resource_init = {
@@ -1049,6 +1403,19 @@ static const struct adsp_data neo_cdsp_resource = {
 	.ssctl_id = 0x17,
 };
 
+static const struct adsp_data anorak_cdsp_resource = {
+	.crash_reason_smem = 601,
+	.firmware_name = "cdsp.mdt",
+	.pas_id = 18,
+	.minidump_id = 7,
+	.uses_elf64 = true,
+	.has_aggre2_clk = false,
+	.auto_boot = false,
+	.ssr_name = "cdsp",
+	.sysmon_name = "cdsp",
+	.qmp_name = "cdsp",
+	.ssctl_id = 0x17,
+};
 
 static const struct adsp_data diwali_cdsp_resource = {
 	.crash_reason_smem = 601,
@@ -1176,6 +1543,22 @@ static const struct adsp_data parrot_mpss_resource = {
 	.dma_phys_below_32b = true,
 };
 
+static const struct adsp_data ravelin_mpss_resource = {
+	.crash_reason_smem = 421,
+	.firmware_name = "modem.mdt",
+	.pas_id = 4,
+	.free_after_auth_reset = true,
+	.minidump_id = 3,
+	.uses_elf64 = true,
+	.has_aggre2_clk = false,
+	.auto_boot = false,
+	.ssr_name = "mpss",
+	.sysmon_name = "modem",
+	.qmp_name = "modem",
+	.ssctl_id = 0x12,
+	.dma_phys_below_32b = true,
+};
+
 static const struct adsp_data slpi_resource_init = {
 		.crash_reason_smem = 424,
 		.firmware_name = "slpi.mdt",
@@ -1288,6 +1671,18 @@ static const struct adsp_data parrot_wpss_resource = {
 	.ssctl_id = 0x19,
 };
 
+static const struct adsp_data ravelin_wpss_resource = {
+	.crash_reason_smem = 626,
+	.firmware_name = "wpss.mdt",
+	.pas_id = 6,
+	.minidump_id = 4,
+	.uses_elf64 = true,
+	.ssr_name = "wpss",
+	.sysmon_name = "wpss",
+	.qmp_name = "wpss",
+	.ssctl_id = 0x19,
+};
+
 static const struct adsp_data neo_wpss_resource = {
 	.crash_reason_smem = 626,
 	.firmware_name = "wpss.mdt",
@@ -1337,6 +1732,11 @@ static const struct of_device_id adsp_of_match[] = {
 	{ .compatible = "qcom,neo-adsp-pas", .data = &neo_adsp_resource},
 	{ .compatible = "qcom,neo-cdsp-pas", .data = &neo_cdsp_resource},
 	{ .compatible = "qcom,neo-wpss-pas", .data = &neo_wpss_resource},
+	{ .compatible = "qcom,anorak-adsp-pas", .data = &anorak_adsp_resource},
+	{ .compatible = "qcom,anorak-cdsp-pas", .data = &anorak_cdsp_resource},
+	{ .compatible = "qcom,ravelin-adsp-pas", .data = &ravelin_adsp_resource},
+	{ .compatible = "qcom,ravelin-modem-pas", .data = &ravelin_mpss_resource},
+	{ .compatible = "qcom,ravelin-wpss-pas", .data = &ravelin_wpss_resource},
 	{ },
 };
 MODULE_DEVICE_TABLE(of, adsp_of_match);

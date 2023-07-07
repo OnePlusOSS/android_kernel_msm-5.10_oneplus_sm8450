@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (c) 2019-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2021 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2021-2022 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #ifndef _CNSS_REG_H
@@ -52,12 +52,17 @@
 #define CE_REG_INTERVAL				0x2000
 
 #define SHADOW_REG_COUNT			36
+#define SHADOW_REG_LEN_BYTES			4
 #define PCIE_SHADOW_REG_VALUE_0			0x8FC
+#define PCIE_SHADOW_REG_VALUE_1			0x900
 #define PCIE_SHADOW_REG_VALUE_34		0x984
 #define PCIE_SHADOW_REG_VALUE_35		0x988
 
 #define SHADOW_REG_INTER_COUNT			43
 #define PCIE_SHADOW_REG_INTER_0			0x1E05000
+
+#define PCIE_MHI_TIME_LOW			0xA28
+#define PCIE_MHI_TIME_HIGH			0xA2C
 
 #define QDSS_APB_DEC_CSR_BASE			0x1C01000
 
@@ -88,6 +93,11 @@
 #define KIWI_DEBUG_PBL_LOG_SRAM_MAX_SIZE	40
 #define KIWI_DEBUG_SBL_LOG_SRAM_MAX_SIZE	48
 #define KIWI_PBL_BOOTSTRAP_STATUS		0x01A10008
+
+#define MANGO_DEBUG_PBL_LOG_SRAM_START		0x01403D98
+#define MANGO_DEBUG_PBL_LOG_SRAM_MAX_SIZE	40
+#define MANGO_DEBUG_SBL_LOG_SRAM_MAX_SIZE	48
+#define MANGO_PBL_BOOTSTRAP_STATUS		0x01A10008
 
 #define TCSR_PBL_LOGGING_REG			0x01B000F8
 #define PCIE_BHI_ERRDBG2_REG			0x01E0E238
@@ -333,4 +343,7 @@
 #define PCIE_SCRATCH_0_SOC_PCIE_REG 0x1E04040
 #define PCIE_SCRATCH_1_SOC_PCIE_REG 0x1E04044
 #define PCIE_SCRATCH_2_SOC_PCIE_REG 0x1E0405C
+
+#define GCC_GCC_SPARE_REG_1 0x1E40310
+#define GCC_PRE_ARES_DEBUG_TIMER_VAL 0x1E40270
 #endif

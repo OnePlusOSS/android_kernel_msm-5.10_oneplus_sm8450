@@ -217,6 +217,60 @@ static void gunyah_tx_write(struct gunyah_pipe *pipe, const void *data,
 	*pipe->head = cpu_to_le32(head);
 }
 
+static size_t gunyah_sg_copy_toio(struct scatterlist *sg, unsigned int nents,
+				  void *buf, size_t buflen, off_t skip)
+{
+	unsigned int sg_flags = SG_MITER_ATOMIC | SG_MITER_FROM_SG;
+	struct sg_mapping_iter miter;
+	unsigned int offset = 0;
+
+	sg_miter_start(&miter, sg, nents, sg_flags);
+
+	if (!sg_miter_skip(&miter, skip))
+		return 0;
+
+	while ((offset < buflen) && sg_miter_next(&miter)) {
+		unsigned int len;
+
+		len = min(miter.length, buflen - offset);
+		memcpy_toio(buf + offset, miter.addr, len);
+		offset += len;
+	}
+
+	sg_miter_stop(&miter);
+
+	return offset;
+}
+
+static void gunyah_sg_write(struct gunyah_pipe *pipe, struct scatterlist *sg,
+			    int offset, size_t count)
+{
+	size_t len;
+	u32 head;
+	int rc = 0;
+
+	head = le32_to_cpu(*pipe->head);
+
+	len = min_t(size_t, count, pipe->length - head);
+	if (len) {
+		rc = gunyah_sg_copy_toio(sg, sg_nents(sg), pipe->fifo + head,
+					 len, offset);
+		offset += rc;
+	}
+
+	if (len != count)
+		rc = gunyah_sg_copy_toio(sg, sg_nents(sg), pipe->fifo,
+					 count - len, offset);
+
+	head += count;
+	if (head >= pipe->length)
+		head -= pipe->length;
+
+	smp_wmb();
+
+	*pipe->head = cpu_to_le32(head);
+}
+
 static void gunyah_set_tx_notify(struct qrtr_gunyah_dev *qdev)
 {
 	*qdev->tx_pipe.read_notify = cpu_to_le32(1);
@@ -247,16 +301,9 @@ static int qrtr_gunyah_send(struct qrtr_endpoint *ep, struct sk_buff *skb)
 	int chunk_size;
 	int left_size;
 	int offset;
-
 	int rc;
 
 	qdev = container_of(ep, struct qrtr_gunyah_dev, ep);
-
-	rc = skb_linearize(skb);
-	if (rc) {
-		kfree_skb(skb);
-		return rc;
-	}
 
 	left_size = skb->len;
 	offset = 0;
@@ -271,7 +318,21 @@ static int qrtr_gunyah_send(struct qrtr_endpoint *ep, struct sk_buff *skb)
 		else
 			chunk_size = left_size;
 
-		gunyah_tx_write(&qdev->tx_pipe, skb->data + offset, chunk_size);
+		if (skb_is_nonlinear(skb)) {
+			struct scatterlist sg[MAX_SKB_FRAGS + 1];
+
+			sg_init_table(sg, skb_shinfo(skb)->nr_frags + 1);
+			rc = skb_to_sgvec(skb, sg, 0, skb->len);
+			if (rc < 0) {
+				pr_err("failed skb_to_sgvec rc:%d\n", rc);
+				break;
+			}
+			gunyah_sg_write(&qdev->tx_pipe, sg, offset,
+					chunk_size);
+		} else {
+			gunyah_tx_write(&qdev->tx_pipe, skb->data + offset,
+					chunk_size);
+		}
 		offset += chunk_size;
 		left_size -= chunk_size;
 
@@ -452,7 +513,8 @@ static int qrtr_gunyah_rm_cb(struct notifier_block *nb, unsigned long cmd,
 
 	if (vm_status_payload->vm_status == GH_RM_VM_STATUS_READY) {
 		qrtr_gunyah_fifo_init(qdev);
-		if (qrtr_endpoint_register(&qdev->ep, QRTR_EP_NET_ID_AUTO, false)) {
+		if (qrtr_endpoint_register(&qdev->ep, QRTR_EP_NET_ID_AUTO,
+					   false, NULL)) {
 			pr_err("%s: endpoint register failed\n", __func__);
 			return NOTIFY_DONE;
 		}
@@ -647,7 +709,7 @@ static int qrtr_gunyah_probe(struct platform_device *pdev)
 	qdev->ep.xmit = qrtr_gunyah_send;
 	if (!qdev->master) {
 		ret = qrtr_endpoint_register(&qdev->ep, QRTR_EP_NET_ID_AUTO,
-					     false);
+					     false, NULL);
 		if (ret)
 			goto register_fail;
 	}

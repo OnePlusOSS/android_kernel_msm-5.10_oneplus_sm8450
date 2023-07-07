@@ -571,6 +571,15 @@ int nfc_dev_open(struct inode *inode, struct file *filp)
 
 	pr_debug("%s: %d, %d\n", __func__, imajor(inode), iminor(inode));
 
+	/* Set flag to block freezer fake signal if not set already.
+	 * Without this Signal being set, Driver is trying to do a read
+	 * which is causing the delay in moving to Hibernate Mode.
+	 */
+	if (!(current->flags & PF_NOFREEZE)) {
+		current->flags |= PF_NOFREEZE;
+		pr_debug("%s: current->flags 0x%x.\n", __func__, current->flags);
+	}
+
 	mutex_lock(&nfc_dev->dev_ref_mutex);
 
 	filp->private_data = nfc_dev;
@@ -586,6 +595,29 @@ int nfc_dev_open(struct inode *inode, struct file *filp)
 	return 0;
 }
 
+int nfc_dev_flush(struct file *pfile, fl_owner_t id)
+{
+	struct nfc_dev *nfc_dev = pfile->private_data;
+
+	if (!nfc_dev)
+		return -ENODEV;
+	/*
+	 * release blocked user thread waiting for pending read during close
+	 */
+	if (!mutex_trylock(&nfc_dev->read_mutex)) {
+		nfc_dev->release_read = true;
+		nfc_dev->nfc_disable_intr(nfc_dev);
+		wake_up(&nfc_dev->read_wq);
+		pr_debug("%s: waiting for release of blocked read\n", __func__);
+		mutex_lock(&nfc_dev->read_mutex);
+		nfc_dev->release_read = false;
+	} else {
+		pr_debug("%s: read thread already released\n", __func__);
+	}
+	mutex_unlock(&nfc_dev->read_mutex);
+	return 0;
+}
+
 int nfc_dev_close(struct inode *inode, struct file *filp)
 {
 	struct nfc_dev *nfc_dev = container_of(inode->i_cdev,
@@ -595,6 +627,12 @@ int nfc_dev_close(struct inode *inode, struct file *filp)
 		return -ENODEV;
 
 	pr_debug("%s: %d, %d\n", __func__, imajor(inode), iminor(inode));
+
+	/* unset the flag to restore to previous state */
+	if (current->flags & PF_NOFREEZE) {
+		current->flags &= ~PF_NOFREEZE;
+		pr_debug("%s: current->flags 0x%x.\n", __func__, current->flags);
+	}
 
 	mutex_lock(&nfc_dev->dev_ref_mutex);
 
@@ -879,6 +917,7 @@ int nfcc_hw_check(struct nfc_dev *nfc_dev)
 	struct platform_gpio *nfc_gpio = &nfc_dev->configs.gpio;
 
 	/*get fw version in nci mode*/
+	usleep_range(NFC_GPIO_SET_WAIT_TIME_USEC,NFC_GPIO_SET_WAIT_TIME_USEC + 100);//add for Satisfy VEN spec of  15ms delay
 	gpio_set_ven(nfc_dev, 1);
 	gpio_set_ven(nfc_dev, 0);
 	gpio_set_ven(nfc_dev, 1);

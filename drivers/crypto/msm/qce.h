@@ -54,9 +54,9 @@
 #define QCE_CLK_DISABLE_FIRST		3
 #define QCE_BW_REQUEST_RESET_FIRST	4
 
-/* interconnect average and peak bw for crypto device */
-#define CRYPTO_AVG_BW			393600
-#define CRYPTO_PEAK_BW			393600
+/* default average and peak bw for crypto device */
+#define CRYPTO_AVG_BW			384
+#define CRYPTO_PEAK_BW			384
 
 typedef void (*qce_comp_func_ptr_t)(void *areq,
 		unsigned char *icv, unsigned char *iv, int ret);
@@ -106,9 +106,14 @@ enum qce_req_op_enum {
 
 /* Offload operation type */
 enum qce_offload_op_enum {
+	QCE_OFFLOAD_NONE = 0, /* kernel pipe */
 	QCE_OFFLOAD_HLOS_HLOS = 1,
 	QCE_OFFLOAD_HLOS_CPB = 2,
 	QCE_OFFLOAD_CPB_HLOS = 3,
+	QCE_OFFLOAD_HLOS_CPB_1,
+	QCE_OFFLOAD_HLOS_CPB_2,
+	QCE_OFFLOAD_HLOS_CPB_3,
+	QCE_OFFLOAD_HLOS_CPB_4,
 	QCE_OFFLOAD_OPER_LAST
 };
 
@@ -211,4 +216,5 @@ void qce_get_crypto_status(void *handle, unsigned int *s1, unsigned int *s2,
 			   unsigned int *s3, unsigned int *s4,
 			   unsigned int *s5);
 int qce_manage_timeout(void *handle, int req_info);
+int qce_set_irqs(void *handle, bool enable);
 #endif /* __CRYPTO_MSM_QCE_H */

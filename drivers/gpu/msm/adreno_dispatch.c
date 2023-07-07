@@ -958,6 +958,7 @@ static inline void _decrement_submit_now(struct kgsl_device *device)
  *
  * Lock the dispatcher and call _adreno_dispatcher_issueibcmds
  */
+#ifndef OPLUS_FEATURE_DISPLAY
 static void adreno_dispatcher_issuecmds(struct adreno_device *adreno_dev)
 {
 	struct adreno_dispatcher *dispatcher = &adreno_dev->dispatcher;
@@ -989,6 +990,7 @@ static void adreno_dispatcher_issuecmds(struct adreno_device *adreno_dev)
 done:
 	adreno_dispatcher_schedule(device);
 }
+#endif /* OPLUS_FEATURE_DISPLAY */
 
 /**
  * get_timestamp() - Return the next timestamp for the context
@@ -1400,7 +1402,11 @@ static int adreno_dispatcher_queue_cmds(struct kgsl_device_private *dev_priv,
 	 */
 
 	if (dispatch_q->inflight < _context_drawobj_burst)
+#ifdef OPLUS_FEATURE_DISPLAY
+		adreno_dispatcher_schedule(&(adreno_dev->dev));
+#else
 		adreno_dispatcher_issuecmds(adreno_dev);
+#endif /*OPLUS_FEATURE_DISPLAY*/
 done:
 	if (test_and_clear_bit(ADRENO_CONTEXT_FAULT, &context->priv))
 		return -EPROTO;
@@ -1566,13 +1572,15 @@ static void adreno_fault_header(struct kgsl_device *device,
 	const char *type = fault & ADRENO_GMU_FAULT ? "gmu" : "gpu";
 
 	if (!gx_on) {
-		if (drawobj != NULL)
+		if (drawobj != NULL) {
 			pr_fault(device, drawobj,
 				"%s fault ctx %u ctx_type %s ts %u and GX is OFF\n",
 				type, drawobj->context->id,
 				kgsl_context_type(drawctxt->type),
 				drawobj->timestamp);
-		else
+			pr_fault(device, drawobj, "cmdline: %s\n",
+					drawctxt->base.proc_priv->cmdline);
+		} else
 			dev_err(device->dev, "RB[%d] : %s fault and GX is OFF\n",
 				id, type);
 
@@ -1604,6 +1612,9 @@ static void adreno_fault_header(struct kgsl_device *device,
 			kgsl_context_type(drawctxt->type),
 			drawobj->timestamp, status,
 			rptr, wptr, ib1base, ib1sz, ib2base, ib2sz);
+
+		pr_fault(device, drawobj, "cmdline: %s\n",
+				drawctxt->base.proc_priv->cmdline);
 
 		if (rb != NULL)
 			pr_fault(device, drawobj,
@@ -1932,7 +1943,7 @@ static void do_header_and_snapshot(struct kgsl_device *device, int fault,
 	/* Always dump the snapshot on a non-drawobj failure */
 	if (cmdobj == NULL) {
 		adreno_fault_header(device, rb, NULL, fault);
-		kgsl_device_snapshot(device, NULL, fault & ADRENO_GMU_FAULT);
+		kgsl_device_snapshot(device, NULL, NULL, fault & ADRENO_GMU_FAULT);
 		return;
 	}
 
@@ -1944,7 +1955,7 @@ static void do_header_and_snapshot(struct kgsl_device *device, int fault,
 	adreno_fault_header(device, rb, cmdobj, fault);
 
 	if (!(drawobj->context->flags & KGSL_CONTEXT_NO_SNAPSHOT))
-		kgsl_device_snapshot(device, drawobj->context,
+		kgsl_device_snapshot(device, drawobj->context, NULL,
 					fault & ADRENO_GMU_FAULT);
 }
 
@@ -2025,6 +2036,11 @@ static int dispatcher_do_fault(struct adreno_device *adreno_dev)
 	if (gx_on)
 		adreno_readreg64(adreno_dev, ADRENO_REG_CP_RB_BASE,
 			ADRENO_REG_CP_RB_BASE_HI, &base);
+
+#ifdef CONFIG_OPLUS_GPU_MINIDUMP
+//MULTIMEIDA.FEATURE.GPU.MINIDUMP, 2021/07/26, add for oplus gpu mini dump
+	device->snapshotfault = fault;
+#endif
 
 	/*
 	 * Force the CP off for anything but a hard fault to make sure it is
@@ -2761,6 +2777,8 @@ static struct attribute *dispatcher_attrs[] = {
 	NULL,
 };
 
+ATTRIBUTE_GROUPS(dispatcher);
+
 static ssize_t dispatcher_sysfs_show(struct kobject *kobj,
 				   struct attribute *attr, char *buf)
 {
@@ -2795,7 +2813,7 @@ static const struct sysfs_ops dispatcher_sysfs_ops = {
 
 static struct kobj_type ktype_dispatcher = {
 	.sysfs_ops = &dispatcher_sysfs_ops,
-	.default_attrs = dispatcher_attrs,
+	.default_groups = dispatcher_groups,
 };
 
 static const struct adreno_dispatch_ops swsched_ops = {
@@ -2832,7 +2850,7 @@ int adreno_dispatcher_init(struct adreno_device *adreno_dev)
 		return PTR_ERR(dispatcher->worker);
 	}
 
-	sysfs_create_files(&device->dev->kobj, _dispatch_attr_list);
+	WARN_ON(sysfs_create_files(&device->dev->kobj, _dispatch_attr_list));
 
 	mutex_init(&dispatcher->mutex);
 

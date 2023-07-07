@@ -223,11 +223,17 @@ int synx_util_init_group_coredata(struct synx_coredata *synx_obj,
 
 static void synx_util_destroy_coredata(struct kref *kref)
 {
+	int rc;
 	struct synx_coredata *synx_obj =
 		container_of(kref, struct synx_coredata, refcount);
 
-	if (synx_util_is_global_object(synx_obj))
+	if (synx_util_is_global_object(synx_obj)) {
+		rc = synx_global_clear_subscribed_core(synx_obj->global_idx, SYNX_CORE_APSS);
+		if (rc)
+			dprintk(SYNX_ERR, "Failed to clear subscribers");
+
 		synx_global_put_ref(synx_obj->global_idx);
+	}
 	synx_util_object_destroy(synx_obj);
 }
 
@@ -247,6 +253,7 @@ void synx_util_object_destroy(struct synx_coredata *synx_obj)
 	u32 i;
 	s32 sync_id;
 	u32 type;
+	unsigned long flags;
 	struct synx_cb_data *synx_cb, *synx_cb_temp;
 	struct synx_bind_desc *bind_desc;
 	struct bind_operations *bind_ops;
@@ -297,6 +304,29 @@ void synx_util_object_destroy(struct synx_coredata *synx_obj)
 
 	mutex_destroy(&synx_obj->obj_lock);
 	synx_util_release_fence_entry((u64)synx_obj->fence);
+
+	/* dma fence framework expects handles are signaled before release,
+	 * so signal if active handle and has last refcount. Synx handles
+	 * on other cores are still active to carry out usual callflow.
+	 */
+	if (!IS_ERR_OR_NULL(synx_obj->fence)) {
+		spin_lock_irqsave(synx_obj->fence->lock, flags);
+		if (kref_read(&synx_obj->fence->refcount) == 1 &&
+				(synx_util_get_object_status_locked(synx_obj) ==
+				SYNX_STATE_ACTIVE)) {
+			// set fence error to cancel
+			dma_fence_set_error(synx_obj->fence,
+				-SYNX_STATE_SIGNALED_CANCEL);
+
+			rc = dma_fence_signal_locked(synx_obj->fence);
+			if (rc)
+				dprintk(SYNX_ERR,
+					"signaling fence %pK failed=%d\n",
+					synx_obj->fence, rc);
+		}
+		spin_unlock_irqrestore(synx_obj->fence->lock, flags);
+	}
+
 	dma_fence_put(synx_obj->fence);
 	kfree(synx_obj);
 	dprintk(SYNX_MEM, "released synx object %pK\n", synx_obj);
@@ -873,7 +903,6 @@ static void synx_util_cleanup_fence(
 			if (synx_util_get_object_status_locked(synx_obj) ==
 				SYNX_STATE_ACTIVE) {
 				signal_cb->synx_obj = NULL;
-				signal_cb->handle = synx_obj->global_idx;
 				synx_obj->signal_cb =  NULL;
 				/*
 				 * release reference held by signal cb and
@@ -1163,8 +1192,8 @@ void synx_util_cb_dispatch(struct work_struct *cb_dispatch)
 	}
 
 	dprintk(SYNX_DBG,
-		"[sess :%llu] kernel cb dispatch for handle %d\n",
-		client->id, payload.h_synx);
+		"callback dispatched for handle %u, status %u, data %pK\n",
+		payload.h_synx, payload.status, payload.data);
 
 	/* dispatch kernel callback */
 	payload.cb_func(payload.h_synx,
@@ -1290,12 +1319,13 @@ static void synx_client_cleanup(struct work_struct *dispatch)
 	struct synx_client *client =
 		container_of(dispatch, struct synx_client, dispatch);
 	struct synx_handle_coredata *curr;
+	struct hlist_node *tmp;
 
 	/*
 	 * go over all the remaining synx obj handles
 	 * un-released from this session and remove them.
 	 */
-	hash_for_each(client->handle_map, i, curr, node) {
+	hash_for_each_safe(client->handle_map, i, tmp, curr, node) {
 		dprintk(SYNX_WARN,
 			"[sess :%llu] un-released handle %u\n",
 			client->id, curr->key);

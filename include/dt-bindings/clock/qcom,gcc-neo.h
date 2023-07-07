@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * Copyright (c) 2021, Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2021-2022, Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #ifndef _DT_BINDINGS_CLK_QCOM_GCC_NEO_H
@@ -128,6 +128,10 @@
 #define GCC_GPLL7						118
 #define GCC_DDRSS_SPAD_CLK					119
 #define GCC_DDRSS_SPAD_CLK_SRC					120
+#define GCC_VIDEO_AXI0_SREG					121
+#define GCC_VIDEO_AXI1_SREG					122
+#define GCC_IRIS_SS_HF_AXI1_SREG				123
+#define GCC_IRIS_SS_SPD_AXI1_SREG				124
 
 /* GCC resets */
 #define GCC_CAMERA_BCR						0
@@ -162,5 +166,8 @@
 #define GCC_VIDEO_AXI0_CLK_ARES					29
 #define GCC_VIDEO_AXI1_CLK_ARES					30
 #define GCC_VIDEO_BCR						31
+#define GCC_IRIS_SS_HF_AXI_CLK_ARES				32
+#define GCC_IRIS_SS_SPD_AXI_CLK_ARES				33
+#define GCC_DDRSS_SPAD_CLK_ARES					34
 
 #endif

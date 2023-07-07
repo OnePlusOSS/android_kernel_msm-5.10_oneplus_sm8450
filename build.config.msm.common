@@ -37,7 +37,12 @@ append_cmd PRE_DEFCONFIG_CMDS 'compile_external_dtc'
 
 ################################################################################
 ## DTB general support
+echo "MSM_ARCH: -${MSM_ARCH}-"
+if [ "${MSM_ARCH}X" == "waipio_tuivmX" ]; then
 DTB_DIR=vendor/qcom
+else
+DTB_DIR=vendor/oplus
+fi
 
 MAKE_GOALS+=" dtbs"
 
@@ -106,7 +111,9 @@ function merge_defconfig_fragments() {
     echo "ERROR! Detected overridden config!"
     grep -C 1 -E -e "Previous value: [^=]+=[ym]" $output >&2
     rm $output
-    exit 1
+    if [ "${OPLUS_BUILD_DO}" != "true" ]; then
+      exit 1
+    fi
   fi
   local temp_config=$(mktemp)
   (cd ${KERNEL_DIR} && KCONFIG_CONFIG=${temp_config} make "${TOOL_ARGS[@]}" O=${OUT_DIR} "${MAKE_ARGS[@]}" ${DEFCONFIG}) 2>&1 | tee $output
@@ -114,8 +121,10 @@ function merge_defconfig_fragments() {
     echo "========================================================"
     echo "ERROR! Treating config warnings as errors"
     grep -e "warning" $output >&2
-    rm $output $temp_config
-    exit 1
+    if [ "${OPLUS_BUILD_DO}" != "true" ]; then
+      rm $output $temp_config
+      exit 1
+    fi
   fi
   rm $output $temp_config
   set -x
@@ -137,7 +146,9 @@ function check_merged_defconfig() {
     echo "ERROR! Defconfig fragment did not apply as expected"
     grep -v -E -e "^\+" -e "^CMDLINE " $output
     rm $output
-    exit 1
+    if [ "${OPLUS_BUILD_DO}" != "true" ]; then
+      exit 1
+    fi
   fi
   rm $output
   set -x
@@ -173,8 +184,21 @@ function prepare_vendor_dlkm() {
     else
       module_list_flag="-e ''"
     fi
+
+#ifdef USING_ODM_DLKM
+    local odm_list_flag=
+    if [ -e "${ODM_MODULES_LIST}" ]; then
+        odm_list_flag="-f ${ODM_MODULES_LIST}"
+    else
+        odm_list_flag="-e ''"
+    fi
     (cd "${MODULES_STAGING_DIR}/lib/modules/" && find -type f -name "*.ko" -printf "%f\n") | \
-      grep -w -v ${module_list_flag} - > ${MODULES_STAGING_DIR}/vendor_dlkm.modules.load
+        grep -w -v ${module_list_flag} | grep -w -v ${odm_list_flag} - > \
+        ${MODULES_STAGING_DIR}/vendor_dlkm.modules.load
+#else
+#(cd "${MODULES_STAGING_DIR}/lib/modules/" && find -type f -name "*.ko" -printf "%f\n") | \
+#      grep -w -v ${module_list_flag} - > ${MODULES_STAGING_DIR}/vendor_dlkm.modules.load
+#endif USING_ODM_DLKM
 
     VENDOR_DLKM_MODULES_LIST="${MODULES_STAGING_DIR}/vendor_dlkm.modules.load"
   fi
@@ -187,6 +211,28 @@ if [ "${BUILD_VENDOR_DLKM}" == "1" ]; then
     VENDOR_DLKM_MODULES_BLOCKLIST="${KERNEL_DIR}/modules.vendor_blocklist.${CONFIG_TARGET}"
   fi
 fi
+
+#ifdef USING_ODM_DLKM
+function prepare_odm_dlkm() {
+	if [ -z "${ODM_DLKM_MODULES_LIST}" ]; then
+		local module_list_flag=
+		if [ -e "${ODM_MODULES_LIST}" ]; then
+			module_list_flag="-f ${ODM_MODULES_LIST}"
+		else
+			module_list_flag="-e ''"
+		fi
+		(cd "${MODULES_STAGING_DIR}/lib/modules/" && find -type f -name "*.ko" -printf "%f\n") | \
+			grep -w ${module_list_flag} - > ${MODULES_STAGING_DIR}/odm_dlkm.modules.load
+
+		ODM_DLKM_MODULES_LIST="${MODULES_STAGING_DIR}/odm_dlkm.modules.load"
+	fi
+
+	SUPER_IMAGE_CONTENTS+=" ${DIST_DIR}/odm_dlkm.img"
+}
+if [ "${BUILD_ODM_DLKM}" == "1" ]; then
+	append_cmd DIST_CMDS 'prepare_odm_dlkm'
+fi
+#endif USING_ODM_DLKM
 
 KERNEL_BINARY=Image
 

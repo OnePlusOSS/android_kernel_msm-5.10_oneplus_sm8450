@@ -281,6 +281,9 @@ static int clk_rpmh_bcm_send_cmd(struct clk_rpmh *c, bool enable)
 		cmd_state = 0;
 	}
 
+	if (cmd_state > BCM_TCS_CMD_VOTE_MASK)
+		cmd_state = BCM_TCS_CMD_VOTE_MASK;
+
 	if (c->last_sent_aggr_state != cmd_state) {
 		cmd.addr = c->res_addr;
 		cmd.data = BCM_TCS_CMD(1, enable, 0, cmd_state);
@@ -548,6 +551,7 @@ static const struct clk_rpmh_desc clk_rpmh_sm8250 = {
 DEFINE_CLK_RPMH_ARC(waipio, bi_tcxo, bi_tcxo_ao, "xo.lvl", 0x3, 4);
 DEFINE_CLK_RPMH_VRM(waipio, ln_bb_clk1, ln_bb_clk1_ao, "lnbclka1", 4);
 DEFINE_CLK_RPMH_VRM(waipio, ln_bb_clk2, ln_bb_clk2_ao, "lnbclka2", 4);
+DEFINE_CLK_RPMH_VRM(waipio, ln_bb_clk3, ln_bb_clk3_ao, "lnbclka3", 4);
 DEFINE_CLK_RPMH_VRM_OPT(waipio, rf_clk5, rf_clk5_ao, "rfclka5", 1);
 
 static struct clk_hw *waipio_rpmh_clocks[] = {
@@ -557,6 +561,8 @@ static struct clk_hw *waipio_rpmh_clocks[] = {
 	[RPMH_LN_BB_CLK1_A]	= &waipio_ln_bb_clk1_ao.hw,
 	[RPMH_LN_BB_CLK2]	= &waipio_ln_bb_clk2.hw,
 	[RPMH_LN_BB_CLK2_A]	= &waipio_ln_bb_clk2_ao.hw,
+	[RPMH_LN_BB_CLK3]	= &waipio_ln_bb_clk3.hw,
+	[RPMH_LN_BB_CLK3_A]	= &waipio_ln_bb_clk3_ao.hw,
 	[RPMH_RF_CLK1]		= &lahaina_rf_clk1.hw,
 	[RPMH_RF_CLK1_A]	= &lahaina_rf_clk1_ao.hw,
 	[RPMH_RF_CLK2]		= &lahaina_rf_clk2.hw,
@@ -588,6 +594,10 @@ static struct clk_hw *diwali_rpmh_clocks[] = {
 	[RPMH_RF_CLK3_A]	= &lahaina_rf_clk3_ao.hw,
 	[RPMH_RF_CLK4]		= &lahaina_rf_clk4.hw,
 	[RPMH_RF_CLK4_A]	= &lahaina_rf_clk4_ao.hw,
+/* #ifdef OPLUS_FEATURE_CHG_BASIC */
+	[RPMH_RF_CLK5]		= &waipio_rf_clk5.hw,
+	[RPMH_RF_CLK5_A]	= &waipio_rf_clk5_ao.hw,
+/* endif */
 	[RPMH_IPA_CLK]		= &lahaina_ipa.hw,
 };
 
@@ -606,6 +616,30 @@ static struct clk_hw *neo_rpmh_clocks[] = {
 static const struct clk_rpmh_desc clk_rpmh_neo = {
 	.clks = neo_rpmh_clocks,
 	.num_clks = ARRAY_SIZE(neo_rpmh_clocks),
+};
+
+DEFINE_CLK_RPMH_VRM(anorak, rf_clk1, rf_clk1_ao, "clka1", 1);
+DEFINE_CLK_RPMH_VRM(anorak, ln_bb_clk7, ln_bb_clk7_ao, "clka7", 2);
+DEFINE_CLK_RPMH_VRM(anorak, ln_bb_clk8, ln_bb_clk8_ao, "clka8", 4);
+DEFINE_CLK_RPMH_VRM(anorak, ln_bb_clk9, ln_bb_clk9_ao, "clka9", 2);
+
+static struct clk_hw *anorak_rpmh_clocks[] = {
+	[RPMH_CXO_CLK]		= &waipio_bi_tcxo.hw,
+	[RPMH_CXO_CLK_A]	= &waipio_bi_tcxo_ao.hw,
+	[RPMH_LN_BB_CLK7]	= &anorak_ln_bb_clk7.hw,
+	[RPMH_LN_BB_CLK7_A]	= &anorak_ln_bb_clk7_ao.hw,
+	[RPMH_LN_BB_CLK8]	= &anorak_ln_bb_clk8.hw,
+	[RPMH_LN_BB_CLK8_A]	= &anorak_ln_bb_clk8_ao.hw,
+	[RPMH_LN_BB_CLK9]	= &anorak_ln_bb_clk9.hw,
+	[RPMH_LN_BB_CLK9_A]	= &anorak_ln_bb_clk9_ao.hw,
+	[RPMH_RF_CLK1]		= &anorak_rf_clk1.hw,
+	[RPMH_RF_CLK1_A]	= &anorak_rf_clk1_ao.hw,
+	[RPMH_IPA_CLK]		= &lahaina_ipa.hw,
+};
+
+static const struct clk_rpmh_desc clk_rpmh_anorak = {
+	.clks = anorak_rpmh_clocks,
+	.num_clks = ARRAY_SIZE(anorak_rpmh_clocks),
 };
 
 DEFINE_CLK_RPMH_ARC(sdxlemur, bi_tcxo, bi_tcxo_ao, "xo.lvl", 0x3, 4);
@@ -655,6 +689,27 @@ static struct clk_hw *parrot_rpmh_clocks[] = {
 static const struct clk_rpmh_desc clk_rpmh_parrot = {
 	.clks = parrot_rpmh_clocks,
 	.num_clks = ARRAY_SIZE(parrot_rpmh_clocks),
+};
+
+DEFINE_CLK_RPMH_VRM(ravelin, ln_bb_clk3, ln_bb_clk3_ao, "lnbclka3", 4);
+
+static struct clk_hw *ravelin_rpmh_clocks[] = {
+	[RPMH_CXO_CLK]		= &waipio_bi_tcxo.hw,
+	[RPMH_CXO_CLK_A]	= &waipio_bi_tcxo_ao.hw,
+	[RPMH_LN_BB_CLK2]	= &waipio_ln_bb_clk2.hw,
+	[RPMH_LN_BB_CLK2_A]	= &waipio_ln_bb_clk2_ao.hw,
+	[RPMH_LN_BB_CLK3]	= &ravelin_ln_bb_clk3.hw,
+	[RPMH_LN_BB_CLK3_A]	= &ravelin_ln_bb_clk3_ao.hw,
+	[RPMH_RF_CLK1]		= &lahaina_rf_clk1.hw,
+	[RPMH_RF_CLK1_A]	= &lahaina_rf_clk1_ao.hw,
+	[RPMH_RF_CLK5]		= &waipio_rf_clk5.hw,
+	[RPMH_RF_CLK5_A]	= &waipio_rf_clk5_ao.hw,
+	[RPMH_IPA_CLK]		= &lahaina_ipa.hw,
+};
+
+static const struct clk_rpmh_desc clk_rpmh_ravelin = {
+	.clks = ravelin_rpmh_clocks,
+	.num_clks = ARRAY_SIZE(ravelin_rpmh_clocks),
 };
 
 static struct clk_hw *of_clk_rpmh_hw_get(struct of_phandle_args *clkspec,
@@ -761,6 +816,8 @@ static const struct of_device_id clk_rpmh_match_table[] = {
 	{ .compatible = "qcom,diwali-rpmh-clk", .data = &clk_rpmh_diwali},
 	{ .compatible = "qcom,neo-rpmh-clk", .data = &clk_rpmh_neo},
 	{ .compatible = "qcom,parrot-rpmh-clk", .data = &clk_rpmh_parrot},
+	{ .compatible = "qcom,anorak-rpmh-clk", .data = &clk_rpmh_anorak},
+	{ .compatible = "qcom,ravelin-rpmh-clk", .data = &clk_rpmh_ravelin},
 	{ }
 };
 MODULE_DEVICE_TABLE(of, clk_rpmh_match_table);

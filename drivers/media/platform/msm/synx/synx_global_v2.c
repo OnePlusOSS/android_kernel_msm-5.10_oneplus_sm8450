@@ -12,17 +12,49 @@
 static struct synx_shared_mem synx_gmem;
 static struct hwspinlock *synx_hwlock;
 
+static u32 synx_gmem_lock_owner(u32 idx)
+{
+	/*
+	 * subscribers field of global table index 0 is used to
+	 * maintain synx gmem lock owner data.
+	 * core updates the field after acquiring the lock and
+	 * before releasing the lock appropriately.
+	 */
+	return synx_gmem.table[0].subscribers;
+}
+
+static void synx_gmem_lock_owner_set(u32 idx)
+{
+	synx_gmem.table[0].subscribers = SYNX_CORE_APSS;
+}
+
+static void synx_gmem_lock_owner_clear(u32 idx)
+{
+	if (synx_gmem.table[0].subscribers != SYNX_CORE_APSS)
+		dprintk(SYNX_WARN, "reset lock owned by core %u\n",
+			synx_gmem.table[0].subscribers);
+
+	synx_gmem.table[0].subscribers = SYNX_CORE_MAX;
+}
+
 static int synx_gmem_lock(u32 idx, unsigned long *flags)
 {
+	int rc;
+
 	if (!synx_hwlock)
 		return -SYNX_INVALID;
 
-	return hwspin_lock_timeout_irqsave(
+	rc = hwspin_lock_timeout_irqsave(
 		synx_hwlock, SYNX_HWSPIN_TIMEOUT, flags);
+	if (!rc)
+		synx_gmem_lock_owner_set(idx);
+
+	return rc;
 }
 
 static void synx_gmem_unlock(u32 idx, unsigned long *flags)
 {
+	synx_gmem_lock_owner_clear(idx);
 	hwspin_unlock_irqrestore(synx_hwlock, flags);
 }
 
@@ -46,11 +78,49 @@ static void synx_global_print_data(
 				func, i, synx_g_obj->parents[i]);
 }
 
+int synx_global_dump_shared_memory(void)
+{
+	int rc = SYNX_SUCCESS, idx;
+	unsigned long flags;
+	struct synx_global_coredata *synx_g_obj;
+
+	if (!synx_gmem.table)
+		return -SYNX_INVALID;
+
+	/* Print bitmap memory*/
+	for (idx = 0; idx < SHRD_MEM_DUMP_NUM_BMAP_WORDS; idx++) {
+		rc = synx_gmem_lock(idx, &flags);
+
+		if (rc)
+			return rc;
+
+		dprintk(SYNX_VERB, "%s: idx %d, bitmap value %d",
+		__func__, idx, synx_gmem.bitmap[idx]);
+
+		synx_gmem_unlock(idx, &flags);
+	}
+
+	/* Print table memory*/
+	for (idx = 0;
+		idx < SHRD_MEM_DUMP_NUM_BMAP_WORDS * sizeof(u32) * NUM_CHAR_BIT;
+		idx++) {
+		rc = synx_gmem_lock(idx, &flags);
+
+		if (rc)
+			return rc;
+
+		dprintk(SYNX_VERB, "%s: idx %d\n", __func__, idx);
+
+		synx_g_obj = &synx_gmem.table[idx];
+		synx_global_print_data(synx_g_obj, __func__);
+
+		synx_gmem_unlock(idx, &flags);
+	}
+	return rc;
+}
+
 static int synx_gmem_init(void)
 {
-	int rc;
-	unsigned long flags;
-
 	if (!synx_gmem.table)
 		return -SYNX_NOMEM;
 
@@ -61,13 +131,9 @@ static int synx_gmem_init(void)
 	}
 
 	/* zero idx not allocated for clients */
-	rc = synx_gmem_lock(SYNX_HWSPIN_BITMAP, &flags);
-	if (rc) {
-		dprintk(SYNX_ERR, "hwspinlock locking failed\n");
-		return rc;
-	}
-	set_bit(0, (unsigned long *)synx_gmem.bitmap);
-	synx_gmem_unlock(SYNX_HWSPIN_BITMAP, &flags);
+	ipclite_global_test_and_set_bit(0,
+		(ipclite_atomic_uint32_t *)synx_gmem.bitmap);
+	memset(&synx_gmem.table[0], 0, sizeof(struct synx_global_coredata));
 
 	return SYNX_SUCCESS;
 }
@@ -96,9 +162,8 @@ u32 synx_global_map_core_id(enum synx_core_id id)
 int synx_global_alloc_index(u32 *idx)
 {
 	int rc = SYNX_SUCCESS;
-	bool bit;
+	u32 prev, index;
 	const u32 size = SYNX_GLOBAL_MAX_OBJS;
-	unsigned long flags;
 
 	if (!synx_gmem.table)
 		return -SYNX_NOMEM;
@@ -106,21 +171,20 @@ int synx_global_alloc_index(u32 *idx)
 	if (IS_ERR_OR_NULL(idx))
 		return -SYNX_INVALID;
 
-	rc = synx_gmem_lock(SYNX_HWSPIN_BITMAP, &flags);
-	if (rc)
-		return rc;
 	do {
-		*idx = find_first_zero_bit((unsigned long *)synx_gmem.bitmap, size);
-		if (*idx >= size) {
+		index = find_first_zero_bit((unsigned long *)synx_gmem.bitmap, size);
+		if (index >= size) {
 			rc = -SYNX_NOMEM;
 			break;
 		}
-		bit = test_and_set_bit(*idx, (unsigned long *)synx_gmem.bitmap);
-	} while (bit);
-	synx_gmem_unlock(SYNX_HWSPIN_BITMAP, &flags);
-
-	if (rc == SYNX_SUCCESS)
-		dprintk(SYNX_MEM, "allocated global idx %u\n", *idx);
+		prev = ipclite_global_test_and_set_bit(index % 32,
+				(ipclite_atomic_uint32_t *)(synx_gmem.bitmap + index/32));
+		if ((prev & (1UL << (index % 32))) == 0) {
+			*idx = index;
+			dprintk(SYNX_MEM, "allocated global idx %u\n", *idx);
+			break;
+		}
+	} while (true);
 
 	return rc;
 }
@@ -142,6 +206,24 @@ int synx_global_init_coredata(u32 h_synx)
 	if (rc)
 		return rc;
 	synx_g_obj = &synx_gmem.table[idx];
+	if (synx_g_obj->status != 0 || synx_g_obj->refcount != 0 ||
+		synx_g_obj->subscribers != 0 || synx_g_obj->handle != 0 ||
+		synx_g_obj->parents[0] != 0) {
+		dprintk(SYNX_ERR,
+				"entry not cleared for idx %u,\n"
+				"synx_g_obj->status %d,\n"
+				"synx_g_obj->refcount %d,\n"
+				"synx_g_obj->subscribers %d,\n"
+				"synx_g_obj->handle %u,\n"
+				"synx_g_obj->parents[0] %d\n",
+				idx, synx_g_obj->status,
+				synx_g_obj->refcount,
+				synx_g_obj->subscribers,
+				synx_g_obj->handle,
+				synx_g_obj->parents[0]);
+		synx_gmem_unlock(idx, &flags);
+		return -SYNX_INVALID;
+	}
 	memset(synx_g_obj, 0, sizeof(*synx_g_obj));
 	/* set status to active */
 	synx_g_obj->status = SYNX_STATE_ACTIVE;
@@ -261,6 +343,28 @@ int synx_global_set_subscribed_core(u32 idx, enum synx_core_id id)
 		return rc;
 	synx_g_obj = &synx_gmem.table[idx];
 	synx_g_obj->subscribers |= (1UL << id);
+	synx_gmem_unlock(idx, &flags);
+
+	return SYNX_SUCCESS;
+}
+
+int synx_global_clear_subscribed_core(u32 idx, enum synx_core_id id)
+{
+	int rc;
+	unsigned long flags;
+	struct synx_global_coredata *synx_g_obj;
+
+	if (!synx_gmem.table)
+		return -SYNX_NOMEM;
+
+	if (id >= SYNX_CORE_MAX || !synx_is_valid_idx(idx))
+		return -SYNX_INVALID;
+
+	rc = synx_gmem_lock(idx, &flags);
+	if (rc)
+		return rc;
+	synx_g_obj = &synx_gmem.table[idx];
+	synx_g_obj->subscribers &= ~(1UL << id);
 	synx_gmem_unlock(idx, &flags);
 
 	return SYNX_SUCCESS;
@@ -453,20 +557,27 @@ static int synx_global_update_status_core(u32 idx,
 	synx_gmem_unlock(idx, &flags);
 
 	if (clear) {
-		rc = synx_gmem_lock(SYNX_HWSPIN_BITMAP, &flags);
-		if (rc) {
-			dprintk(SYNX_ERR,
-				"failed to clear bit %u\n", idx);
-			return rc;
-		}
-		clear_bit(idx, (unsigned long *)synx_gmem.bitmap);
-		synx_gmem_unlock(SYNX_HWSPIN_BITMAP, &flags);
+		ipclite_global_test_and_clear_bit(idx%32,
+			(ipclite_atomic_uint32_t *)(synx_gmem.bitmap + idx/32));
+		dprintk(SYNX_MEM,
+			"cleared global idx %u\n", idx);
 	}
 
 	/* notify waiting clients on signal */
 	if (data) {
 		/* notify wait client */
-		for (i = 0; i < SYNX_CORE_MAX; i++) {
+
+	/* In case of SSR, someone might be waiting on same core
+	 * However, in other cases, synx_signal API will take care
+	 * of signaling handles on same core and thus we don't need
+	 * to send interrupt
+	 */
+		if (status == SYNX_STATE_SIGNALED_SSR)
+			i = 0;
+		else
+			i = 1;
+
+		for (; i < SYNX_CORE_MAX ; i++) {
 			if (!wait_cores[i])
 				continue;
 			dprintk(SYNX_DBG,
@@ -575,14 +686,9 @@ void synx_global_put_ref(u32 idx)
 	synx_gmem_unlock(idx, &flags);
 
 	if (clear) {
-		if (synx_gmem_lock(SYNX_HWSPIN_BITMAP, &flags)) {
-			dprintk(SYNX_ERR,
-				"failed to clear bit %u\n", idx);
-			return;
-		}
-		clear_bit(idx, (unsigned long *)synx_gmem.bitmap);
-		dprintk(SYNX_MEM, "released global idx %u\n", idx);
-		synx_gmem_unlock(SYNX_HWSPIN_BITMAP, &flags);
+		ipclite_global_test_and_clear_bit(idx%32,
+			(ipclite_atomic_uint32_t *)(synx_gmem.bitmap + idx/32));
+		dprintk(SYNX_MEM, "cleared global idx %u\n", idx);
 	}
 }
 
@@ -681,8 +787,17 @@ int synx_global_recover(enum synx_core_id core_id)
 	bool clear_idx[SYNX_GLOBAL_MAX_OBJS] = {false};
 	bool update;
 
+	dprintk(SYNX_WARN, "Subsystem restart for core_id: %d\n", core_id);
 	if (!synx_gmem.table)
 		return -SYNX_NOMEM;
+
+	ipclite_recover(synx_global_map_core_id(core_id));
+
+	/* recover synx gmem lock if it was owned by core in ssr */
+	if (synx_gmem_lock_owner(0) == core_id) {
+		synx_gmem_lock_owner_clear(0);
+		hwspin_unlock_raw(synx_hwlock);
+	}
 
 	idx = find_next_bit((unsigned long *)synx_gmem.bitmap,
 			size, idx + 1);
@@ -711,20 +826,13 @@ int synx_global_recover(enum synx_core_id core_id)
 				size, idx + 1);
 	}
 
-	rc = synx_gmem_lock(SYNX_HWSPIN_BITMAP, &flags);
-	if (rc)
-		return rc;
-	idx = find_next_bit((unsigned long *)synx_gmem.bitmap,
-			SYNX_GLOBAL_MAX_OBJS, 1);
-	while (idx < size) {
+	for (idx = 1; idx < size; idx++) {
 		if (clear_idx[idx]) {
-			clear_bit(idx, (unsigned long *)synx_gmem.bitmap);
+			ipclite_global_test_and_clear_bit(idx % 32,
+				(ipclite_atomic_uint32_t *)(synx_gmem.bitmap + idx/32));
 			dprintk(SYNX_MEM, "released global idx %u\n", idx);
 		}
-		idx = find_next_bit((unsigned long *)synx_gmem.bitmap,
-			SYNX_GLOBAL_MAX_OBJS, idx + 1);
 	}
-	synx_gmem_unlock(SYNX_HWSPIN_BITMAP, &flags);
 
 	return SYNX_SUCCESS;
 }

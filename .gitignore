@@ -164,3 +164,16 @@ arch/arm/boot/dts/vendor
 
 # Documentation toolchain
 sphinx_*/
+
+# Add for oplus
+drivers/soc/oplus/system
+drivers/soc/oplus/dfr
+include/soc/oplus/dfr
+drivers/soc/oplus/dft
+include/soc/oplus/dft
+drivers/soc/oplus/boot
+include/soc/oplus/boot
+drivers/input/oplus_secure_drivers
+drivers/soc/oplus/power
+net/oplus_modules
+

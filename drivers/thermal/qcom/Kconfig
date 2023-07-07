@@ -175,6 +175,15 @@ config QTI_DDR_COOLING_DEVICE
 	   to meet the performance requirement under thermally constrained
 	   conditions.
 
+config MAX31760_FAN_CONTROLLER
+	tristate "MAX31760 Fan Controller Driver"
+	depends on THERMAL && THERMAL_OF
+	help
+	  This enables the MAX31760 fan controller cooling device.
+	  This driver uses i2c bus to control registers for setting
+	  different fan speed. Also, this driver initializes the power for
+	  the fan controller.
+
 config QTI_THERMALZONE_CONFIG_DEBUG
 	tristate "QTI ThermalZone config debug driver"
 	depends on THERMAL && THERMAL_OF
@@ -209,3 +218,12 @@ config QTI_DEVFREQ_CDEV
 	   This enables the QTI devfreq cooling device, which will help
 	   register the devfreq cooling devices with thermal framework and
 	   allow limiting the devfreq frequency.
+
+config QTI_AOP_REG_COOLING_DEVICE
+	bool "QTI AOP Regulator cooling device"
+	depends on THERMAL_OF && MSM_QMP
+	help
+	  This enables the AOP based Regulator cooling device. This cooling
+	  device will be used by QTI chipset to place a floor voltage
+	  restriction at low temperatures. The cooling device will message
+	  the AOP using mail box to establish the floor voltage.

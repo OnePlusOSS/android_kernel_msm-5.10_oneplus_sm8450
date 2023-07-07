@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2021, Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2021-2022, Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <linux/clk-provider.h>
@@ -831,8 +831,8 @@ static struct clk_rcg2 cam_cc_icp_clk_src = {
 };
 
 static const struct freq_tbl ftbl_cam_cc_mclk0_clk_src[] = {
-	F(19200000, P_CAM_CC_PLL2_OUT_EVEN, 2, 2, 25),
-	F(24000000, P_CAM_CC_PLL2_OUT_EVEN, 2, 1, 10),
+	F(19200000, P_CAM_CC_PLL2_OUT_MAIN, 1, 1, 50),
+	F(24000000, P_CAM_CC_PLL2_OUT_MAIN, 10, 1, 4),
 	F(64000000, P_CAM_CC_PLL2_OUT_MAIN, 15, 0, 0),
 	{ }
 };
@@ -1026,7 +1026,7 @@ static struct clk_rcg2 cam_cc_tfe_0_clk_src = {
 		.name = "cam_cc_tfe_0_clk_src",
 		.parent_data = cam_cc_parent_data_2,
 		.num_parents = ARRAY_SIZE(cam_cc_parent_data_2),
-		.flags = CLK_SET_RATE_PARENT,
+		.flags = CLK_SET_RATE_PARENT | CLK_GET_RATE_NOCACHE,
 		.ops = &clk_rcg2_ops,
 	},
 	.clkr.vdd_data = {
@@ -1075,7 +1075,7 @@ static struct clk_rcg2 cam_cc_tfe_1_clk_src = {
 		.name = "cam_cc_tfe_1_clk_src",
 		.parent_data = cam_cc_parent_data_2,
 		.num_parents = ARRAY_SIZE(cam_cc_parent_data_2),
-		.flags = CLK_SET_RATE_PARENT,
+		.flags = CLK_SET_RATE_PARENT | CLK_GET_RATE_NOCACHE,
 		.ops = &clk_rcg2_ops,
 	},
 	.clkr.vdd_data = {
@@ -1124,7 +1124,7 @@ static struct clk_rcg2 cam_cc_tfe_2_clk_src = {
 		.name = "cam_cc_tfe_2_clk_src",
 		.parent_data = cam_cc_parent_data_2,
 		.num_parents = ARRAY_SIZE(cam_cc_parent_data_2),
-		.flags = CLK_SET_RATE_PARENT,
+		.flags = CLK_SET_RATE_PARENT | CLK_GET_RATE_NOCACHE,
 		.ops = &clk_rcg2_ops,
 	},
 	.clkr.vdd_data = {

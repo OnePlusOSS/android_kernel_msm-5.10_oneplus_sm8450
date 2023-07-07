@@ -1075,8 +1075,10 @@ static int  __tmc_etr_enable_hw(struct tmc_drvdata *drvdata)
 
 	/* Wait for TMCSReady bit to be set */
 	rc = tmc_wait_for_tmcready(drvdata);
-	if (rc)
+	if (rc) {
+		CS_LOCK(drvdata->base);
 		return rc;
+	}
 
 	writel_relaxed(etr_buf->size / 4, drvdata->base + TMC_RSZ);
 	writel_relaxed(TMC_MODE_CIRCULAR_BUFFER, drvdata->base + TMC_MODE);
@@ -1148,9 +1150,10 @@ static int tmc_etr_enable_hw(struct tmc_drvdata *drvdata,
 
 	drvdata->etr_buf = etr_buf;
 	rc = __tmc_etr_enable_hw(drvdata);
-	if (rc)
+	if (rc) {
+		drvdata->etr_buf = NULL;
 		coresight_disclaim_device(drvdata->csdev);
-
+	}
 	return rc;
 }
 

@@ -66,6 +66,9 @@ struct qcedev_async_req {
 	};
 	struct qcedev_handle			*handle;
 	int					err;
+	wait_queue_head_t			wait_q;
+	uint16_t				state;
+	bool					timed_out;
 };
 
 /**********************************************************************
@@ -88,6 +91,10 @@ struct qcedev_control {
 
 	/* replaced msm_bus with interconnect path */
 	struct icc_path *icc_path;
+
+	/* average and peak bw values for interconnect */
+	uint32_t icc_avg_bw;
+	uint32_t icc_peak_bw;
 
 	/* char device */
 	struct cdev cdev;
