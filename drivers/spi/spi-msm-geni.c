@@ -23,9 +23,10 @@
 #include <linux/pinctrl/consumer.h>
 
 #define SPI_NUM_CHIPSELECT	(4)
-#define SPI_XFER_TIMEOUT_MS	(250)
+/* modify timeout to 2s for oplus_consumer_ir spi mode */
+#define SPI_XFER_TIMEOUT_MS	(2000)
 #define SPI_AUTO_SUSPEND_DELAY	(250)
-#define SPI_XFER_TIMEOUT_OFFSET	(250)
+#define SPI_XFER_TIMEOUT_OFFSET  (2000)
 /* SPI SE specific registers */
 #define SE_SPI_CPHA		(0x224)
 #define SE_SPI_LOOPBACK		(0x22C)

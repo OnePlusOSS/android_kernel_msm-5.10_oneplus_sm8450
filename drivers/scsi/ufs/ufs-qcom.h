@@ -10,9 +10,19 @@
 #include <linux/reset.h>
 #include <linux/phy/phy.h>
 #include <linux/pm_qos.h>
+
+/*feature-flashaging806-v001-1-begin*/
+#include <linux/proc_fs.h>
+/*feature-flashaging806-v001-1-end*/
+
 #include <linux/nvmem-consumer.h>
+
 #include "ufshcd.h"
 #include "unipro.h"
+
+#ifdef CONFIG_UFSFEATURE
+#include "ufsfeature.h"
+#endif
 
 #define MAX_UFS_QCOM_HOSTS	2
 #define MAX_U32                 (~(u32)0)
@@ -153,6 +163,117 @@ enum {
 				 CC_UFS_ICE_CORE_CLK_REQ_EN |\
 				 CC_UFS_UNIPRO_CORE_CLK_REQ_EN |\
 				 CC_UFS_AUXCLK_REQ_EN)
+/*define ufs uic error code*/
+
+/*feature-flashaging806-v001-2-begin*/
+enum unipro_pa_errCode {
+	UNIPRO_PA_LANE0_ERR_CNT,
+	UNIPRO_PA_LANE1_ERR_CNT,
+	UNIPRO_PA_LANE2_ERR_CNT,
+	UNIPRO_PA_LANE3_ERR_CNT,
+	UNIPRO_PA_LINE_RESET,
+	UNIPRO_PA_ERR_MAX
+};
+
+enum unipro_dl_errCode {
+	UNIPRO_DL_NAC_RECEIVED,
+	UNIPRO_DL_TCX_REPLAY_TIMER_EXPIRED,
+	UNIPRO_DL_AFCX_REQUEST_TIMER_EXPIRED,
+	UNIPRO_DL_FCX_PROTECTION_TIMER_EXPIRED,
+	UNIPRO_DL_CRC_ERROR,
+	UNIPRO_DL_RX_BUFFER_OVERFLOW,
+	UNIPRO_DL_MAX_FRAME_LENGTH_EXCEEDED,
+	UNIPRO_DL_WRONG_SEQUENCE_NUMBER,
+	UNIPRO_DL_AFC_FRAME_SYNTAX_ERROR,
+	UNIPRO_DL_NAC_FRAME_SYNTAX_ERROR,
+	UNIPRO_DL_EOF_SYNTAX_ERROR,
+	UNIPRO_DL_FRAME_SYNTAX_ERROR,
+	UNIPRO_DL_BAD_CTRL_SYMBOL_TYPE,
+	UNIPRO_DL_PA_INIT_ERROR,
+	UNIPRO_DL_PA_ERROR_IND_RECEIVED,
+	UNIPRO_DL_PA_INIT,
+	UNIPRO_DL_ERR_MAX
+};
+
+enum unipro_nl_errCode {
+	UNIPRO_NL_UNSUPPORTED_HEADER_TYPE,
+	UNIPRO_NL_BAD_DEVICEID_ENC,
+	UNIPRO_NL_LHDR_TRAP_PACKET_DROPPING,
+	UNIPRO_NL_ERR_MAX
+};
+
+enum unipro_tl_errCode {
+	UNIPRO_TL_UNSUPPORTED_HEADER_TYPE,
+	UNIPRO_TL_UNKNOWN_CPORTID,
+	UNIPRO_TL_NO_CONNECTION_RX,
+	UNIPRO_TL_CONTROLLED_SEGMENT_DROPPING,
+	UNIPRO_TL_BAD_TC,
+	UNIPRO_TL_E2E_CREDIT_OVERFLOW,
+	UNIPRO_TL_SAFETY_VALVE_DROPPING,
+	UNIPRO_TL_ERR_MAX
+};
+
+enum unipro_dme_errCode {
+	UNIPRO_DME_GENERIC,
+	UNIPRO_DME_TX_QOS,
+	UNIPRO_DME_RX_QOS,
+	UNIPRO_DME_PA_INIT_QOS,
+	UNIPRO_DME_ERR_MAX
+};
+
+enum unipro_err_time_stamp {
+	UNIPRO_0_STAMP,
+	UNIPRO_1_STAMP,
+	UNIPRO_2_STAMP,
+	UNIPRO_3_STAMP,
+	UNIPRO_4_STAMP,
+	UNIPRO_5_STAMP,
+	UNIPRO_6_STAMP,
+	UNIPRO_7_STAMP,
+	UNIPRO_8_STAMP,
+	UNIPRO_9_STAMP,
+	STAMP_RECORD_MAX
+};
+
+enum unipro_err_time_gear {
+	UNIPRO_0_GEAR,
+	UNIPRO_1_GEAR,
+	UNIPRO_2_GEAR,
+	UNIPRO_3_GEAR,
+	UNIPRO_4_GEAR,
+	UNIPRO_5_GEAR,
+	UNIPRO_6_GEAR,
+	UNIPRO_7_GEAR,
+	UNIPRO_8_GEAR,
+	UNIPRO_9_GEAR
+};
+
+#define STAMP_MIN_INTERVAL ((ktime_t)600000000000) /*ns, 10min*/
+
+struct signal_quality {
+	u32 ufs_device_err_cnt;
+	u32 ufs_host_err_cnt;
+	u32 ufs_bus_err_cnt;
+	u32 ufs_crypto_err_cnt;
+	u32 ufs_link_lost_cnt;
+	u32 unipro_PA_err_total_cnt;
+	u32 unipro_PA_err_cnt[UNIPRO_PA_ERR_MAX];
+	u32 unipro_DL_err_total_cnt;
+	u32 unipro_DL_err_cnt[UNIPRO_DL_ERR_MAX];
+	u32 unipro_NL_err_total_cnt;
+	u32 unipro_NL_err_cnt[UNIPRO_NL_ERR_MAX];
+	u32 unipro_TL_err_total_cnt;
+	u32 unipro_TL_err_cnt[UNIPRO_TL_ERR_MAX];
+	u32 unipro_DME_err_total_cnt;
+	u32 unipro_DME_err_cnt[UNIPRO_DME_ERR_MAX];
+	/* first 10 error cnt, interval is 10min at least*/
+	u32 hs[STAMP_RECORD_MAX];
+	u32 gear[STAMP_RECORD_MAX];
+	ktime_t stamp[STAMP_RECORD_MAX];
+	int stamp_pos;
+};
+/*feature-flashaging806-v001-2-end*/
+
 /* bit offset */
 enum {
 	OFFSET_UFS_PHY_SOFT_RESET           = 1,
@@ -231,6 +352,67 @@ enum ufs_qcom_phy_init_type {
  * Enable this quirk to give it an additional 100us.
  */
 #define UFS_DEVICE_QUIRK_PA_HIBER8TIME          (1 << 15)
+
+/* Device Quirks */
+/*
+ * Samsung QLC ufs device needs a different set of drivers for HID and TW.
+ * Enable this quirk to config QLC HID & TW on.
+ */
+#define UFS_DEVICE_QUIRK_SAMSUNG_QLC          (1 << 17)
+
+/*feature-devinfo-v001-1-begin*/
+struct ufs_transmission_status_t
+{
+	u8  transmission_status_enable;
+
+	u64 gear_min_write_sec;
+	u64 gear_max_write_sec;
+	u64 gear_min_read_sec;
+	u64 gear_max_read_sec;
+
+	u64 gear_min_write_us;
+	u64 gear_max_write_us;
+	u64 gear_min_read_us;
+	u64 gear_max_read_us;
+
+	u64 gear_min_dev_us;
+	u64 gear_max_dev_us;
+
+	u64 gear_min_other_sec;
+	u64 gear_max_other_sec;
+	u64 gear_min_other_us;
+	u64 gear_max_other_us;
+
+	u64 scsi_send_count;
+	u64 dev_cmd_count;
+
+	u64 active_count;
+	u64 active_time;
+
+	u64 sleep_count;
+	u64 sleep_time;
+
+	u64 powerdown_count;
+	u64 powerdown_time;
+
+	u64 power_total_count;
+	u32 current_pwr_mode;
+};
+/*feature-devinfo-v001-1-end*/
+
+/*feature-flashaging806-v001-3-begin*/
+struct unipro_signal_quality_ctrl {
+	struct proc_dir_entry *ctrl_dir;
+	struct signal_quality record;
+	struct signal_quality record_upload;
+};
+/*feature-flashaging806-v001-3-end*/
+
+/*
+ * Some ufs device vendors need a different TSync length.
+ * Enable this quirk to give an additional TX_HS_SYNC_LENGTH.
+ */
+#define UFS_DEVICE_QUIRK_PA_TX_HSG1_SYNC_LENGTH (1 << 16)
 
 static inline void
 ufs_qcom_get_controller_revision(struct ufs_hba *hba,
@@ -472,6 +654,16 @@ struct ufs_qcom_host {
 	u32 clk_next_mode;
 	u32 clk_curr_mode;
 	bool is_clk_scale_enabled;
+	/*google patch Random W/R performance improvement*/
+	atomic_t hi_pri_en;
+	atomic_t therm_mitigation;
+	cpumask_t perf_mask;
+	cpumask_t def_mask;
+	bool irq_affinity_support;
+
+#if defined(CONFIG_UFSFEATURE)
+	struct ufsf_feature ufsf;
+#endif
 };
 
 static inline u32
@@ -541,6 +733,9 @@ out:
  *  SCSI_IOCTL_GET_PCI
  */
 #define UFS_IOCTL_QUERY			0x5388
+/*feature-memorymonitor-v001-1-begin*/
+#define UFS_IOCTL_MONITOR               0x5392  /* For monitor access */
+/*feature-memorymonitor-v001-1-end*/
 
 /**
  * struct ufs_ioctl_query_data - used to transfer data to and from user via
@@ -587,6 +782,15 @@ struct ufs_ioctl_query_data {
 	 */
 	__u8 buffer[0];
 };
+
+#if defined(CONFIG_UFSFEATURE)
+static inline struct ufsf_feature *ufs_qcom_get_ufsf(struct ufs_hba *hba)
+{
+	struct ufs_qcom_host *host = ufshcd_get_variant(hba);
+
+	return &host->ufsf;
+}
+#endif
 
 /* ufs-qcom-ice.c */
 

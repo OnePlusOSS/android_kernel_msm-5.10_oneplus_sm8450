@@ -418,6 +418,7 @@ struct tzdbg {
 	bool is_full_encrypted_tz_logs_enabled;
 	int tz_diag_minor_version;
 	int tz_diag_major_version;
+	struct mutex lock;
 };
 
 struct tzbsp_encr_log_t {
@@ -1127,15 +1128,19 @@ static int _disp_qsee_log_stats(size_t count)
 {
 	static struct tzdbg_log_pos_t log_start = {0};
 	static struct tzdbg_log_pos_v2_t log_start_v2 = {0};
-
-	if (!tzdbg.is_enlarged_buf)
-		return _disp_log_stats(g_qsee_log, &log_start,
+	int ret = 0;
+	mutex_lock(&(tzdbg.lock));
+	if (!tzdbg.is_enlarged_buf) {
+		ret = _disp_log_stats(g_qsee_log, &log_start,
 			QSEE_LOG_BUF_SIZE - sizeof(struct tzdbg_log_pos_t),
 			count, TZDBG_QSEE_LOG);
-
-	return _disp_log_stats_v2(g_qsee_log_v2, &log_start_v2,
+	} else {
+		ret = _disp_log_stats_v2(g_qsee_log_v2, &log_start_v2,
 		QSEE_LOG_BUF_SIZE_V2 - sizeof(struct tzdbg_log_pos_v2_t),
 		count, TZDBG_QSEE_LOG);
+	}
+	mutex_unlock(&(tzdbg.lock));
+	return ret;
 }
 
 static int _disp_hyp_general_stats(size_t count)
@@ -1253,7 +1258,7 @@ static ssize_t tzdbg_fs_read_encrypted(int tz_id, char __user *buf,
 		pr_err("invalid encrypted log id %d\n", tz_id);
 		return ret;
 	}
-
+	mutex_lock(&(tzdbg.lock));
 	if (!stat->display_len) {
 		if (tz_id == TZDBG_QSEE_LOG)
 			stat->display_len = _disp_encrpted_log_stats(
@@ -1275,6 +1280,7 @@ static ssize_t tzdbg_fs_read_encrypted(int tz_id, char __user *buf,
 				count);
 	stat->display_offset += ret;
 	stat->display_len -= ret;
+	mutex_unlock(&(tzdbg.lock));
 	pr_debug("ret = %d, offset = %d\n", ret, (int)(*offp));
 	pr_debug("display_len = %d, offset = %d\n",
 			stat->display_len, stat->display_offset);
@@ -1778,6 +1784,8 @@ static int tz_log_probe(struct platform_device *pdev)
 		ret = -ENOMEM;
 		goto exit_free_encr_log_buf;
 	}
+	/* init tzdbg lock */
+	mutex_init(&(tzdbg.lock));
 
 	if (tzdbg_fs_init(pdev))
 		goto exit_free_disp_buf;

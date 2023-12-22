@@ -43,6 +43,13 @@ int kgsl_bus_update(struct kgsl_device *device,
 	int cur = pwr->pwrlevels[pwr->active_pwrlevel].bus_freq;
 	int buslevel = 0;
 	u32 ab;
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_KGSL_BUS_NOLIMIT)
+	int cur_buslevel = pwr->cur_buslevel;
+
+	if (pwr->bus_nolimit) {
+		cur = max_t(int, cur, cur_buslevel);
+	}
+#endif /* CONFIG_OPLUS_FEATURE_KGSL_BUS_NOLIMIT */
 
 	/* the bus should be ON to update the active frequency */
 	if ((vote_state != KGSL_BUS_VOTE_OFF) &&

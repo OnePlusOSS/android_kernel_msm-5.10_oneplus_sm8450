@@ -33,6 +33,9 @@ struct cma {
 #endif
 	ANDROID_OEM_DATA_ARRAY(1, 4);
 };
+#ifdef CONFIG_CONT_PTE_HUGEPAGE
+extern spinlock_t cont_pte_cma_spinlock;
+#endif
 
 extern struct cma cma_areas[MAX_CMA_AREAS];
 extern unsigned cma_area_count;

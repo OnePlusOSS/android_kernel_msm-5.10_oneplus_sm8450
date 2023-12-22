@@ -9,6 +9,10 @@
 #include <linux/module.h>
 #include <linux/soc/qcom/panel_event_notifier.h>
 
+#ifdef OPLUS_FEATURE_DISPLAY
+#include <soc/oplus/system/oplus_project.h>
+#endif /* OPLUS_FEATURE_DISPLAY */
+
 struct panel_event_notifier_entry {
 	panel_event_notifier_handler handler;
 	void *pvt_data;
@@ -83,6 +87,12 @@ void *panel_event_notifier_register(enum panel_event_notifier_tag tag,
 	entry->tag = tag;
 	mutex_unlock(&panel_event_notifier_entries_lock);
 
+#ifdef OPLUS_FEATURE_DISPLAY
+	if (get_project() == 22001 || get_project() == 22201) {
+		pr_err("client %d registered successfully\n", client_handle);
+	}
+#endif /* OPLUS_FEATURE_DISPLAY */
+
 	pr_debug("client %d registered successfully\n", client_handle);
 	return entry;
 }
@@ -140,15 +150,20 @@ void panel_event_notification_trigger(enum panel_event_notifier_tag tag,
 		mutex_lock(&panel_event_notifier_entries_lock);
 		entry = &panel_event_notifier_entries[i];
 		if (notification->panel != entry->panel) {
-			pr_debug("invalid panel found notification_panel:0x%x entry_panel:0x%x\n",
+			if ((get_project() == 22001 || get_project() == 22201) && notification->notif_type != DRM_PANEL_EVENT_BACKLIGHT) {
+				pr_err("invalid panel found notification_panel:0x%x entry_panel:0x%x i:%d\n",
+						notification->panel, entry->panel, i);
+			} else {
+				pr_debug("invalid panel found notification_panel:0x%x entry_panel:0x%x\n",
 					notification->panel, entry->panel);
+			}
 			mutex_unlock(&panel_event_notifier_entries_lock);
 			continue;
 		}
 
 		/* skip client entries not subscribed to tag */
 		if (entry->tag != tag) {
-			pr_err("tag mismatch entry->tag:%d tag:%d\n", entry->tag, tag);
+			pr_err("tag mismatch entry->tag:%d tag:%d i:%d\n", entry->tag, tag, i);
 			mutex_unlock(&panel_event_notifier_entries_lock);
 			continue;
 		}
@@ -157,12 +172,21 @@ void panel_event_notification_trigger(enum panel_event_notifier_tag tag,
 		pvt_data = entry->pvt_data;
 		mutex_unlock(&panel_event_notifier_entries_lock);
 
+#ifdef OPLUS_FEATURE_DISPLAY
+		if ((get_project() == 22001 || get_project() == 22201) && notification->notif_type != DRM_PANEL_EVENT_BACKLIGHT) {
+			pr_err("triggering notification for tag:%d, type:%d i:%d\n",
+					tag, notification->notif_type, i);
+		}
+#endif /* OPLUS_FEATURE_DISPLAY */
+
 		pr_debug("triggering notification for tag:%d, type:%d\n",
 				tag, notification->notif_type);
 
-		if (handler)
+		if (handler) {
 			handler(tag, notification, pvt_data);
-
+		} else {
+			pr_err("triggering notification for handler is null i:%d\n", i);
+		}
 	}
 }
 EXPORT_SYMBOL(panel_event_notification_trigger);

@@ -37,6 +37,12 @@
  */
 
 #include "nfc_common.h"
+#include "../oplus_nfc/oplus_nfc.h"
+
+#ifdef OPLUS_BUG_STABILITY
+#define NCI_GET_FW_CMD_LEN       8
+#define NCI_GET_FW_RSP_LEN       14
+#endif
 
 /**
  * i2c_disable_irq()
@@ -147,6 +153,18 @@ int i2c_read(struct nfc_dev *nfc_dev, char *buf, size_t count, int timeout)
 				ret = -EIO;
 				goto err;
 			}
+			/*
+			 * NFC service wanted to close the driver so,
+			 * release the calling reader thread asap.
+			 *
+			 * This can happen in case of nfc node close call from
+			 * eSE HAL in that case the NFC HAL reader thread
+			 * will again call read system call
+			 */
+			if (nfc_dev->release_read) {
+				pr_debug("%s: releasing read\n", __func__);
+				return 0;
+			}
 			pr_warn("%s: spurious interrupt detected\n", __func__);
 		}
 	}
@@ -194,10 +212,34 @@ int i2c_write(struct nfc_dev *nfc_dev, const char *buf, size_t count,
 	uint16_t i = 0;
 	uint16_t disp_len = GET_IPCLOG_MAX_PKT_LEN(count);
 
+/*
+ * Add for: SN1XX_CHIP need to write wakeup_cmd but SN220_CHIP not
+ * Get chip_type must send core_reset cmd, and then i2c_write() get chip_type is 0x00
+ * SN220_CHIPID = "0xc1" PN560_CHIPID = "0xca"
+ */
+
+	if ((nfc_dev->nqx_info.info.chip_type != 0xc1)
+	   &&(nfc_dev->nqx_info.info.chip_type != 0xca)
+	   &&(nfc_dev->nqx_info.info.chip_type != 0x00))
+	{
+		int retrycount = 0;
+		char wakeup_cmd[1] = {0};
+		while (++retrycount < 6) {
+			ret = i2c_master_send(nfc_dev->i2c_dev.client, wakeup_cmd, 1);
+			if (ret >= 0) {
+				break;
+			}
+			usleep_range(5000, 5100);
+		}
+		if (ret < 0) {
+			pr_err("%s: failed to write wakeup_cmd : %d, retry for : %d times\n", __func__, ret, retrycount);
+		}
+	}
+
 	if (count > MAX_DL_BUFFER_SIZE)
 		count = MAX_DL_BUFFER_SIZE;
 
-	pr_debug("%s : writing %zu bytes.\n", __func__, count);
+	pr_err("%s : writing %zu bytes.\n", __func__, count);
 
 	NFCLOG_IPC(nfc_dev, false, "%s sending %d B", __func__, count);
 
@@ -219,6 +261,7 @@ int i2c_write(struct nfc_dev *nfc_dev, const char *buf, size_t count,
 		} else if (ret == count)
 			break;
 	}
+
 	return ret;
 }
 
@@ -228,6 +271,10 @@ ssize_t nfc_i2c_dev_read(struct file *filp, char __user *buf,
 	int ret = 0;
 	struct nfc_dev *nfc_dev = (struct nfc_dev *)filp->private_data;
 
+	if (!nfc_dev) {
+		pr_err("%s: device doesn't exist anymore\n", __func__);
+		return -ENODEV;
+	}
 	mutex_lock(&nfc_dev->read_mutex);
 	if (filp->f_flags & O_NONBLOCK) {
 		ret = i2c_master_recv(nfc_dev->i2c_dev.client, nfc_dev->read_kbuf, count);
@@ -254,8 +301,10 @@ ssize_t nfc_i2c_dev_write(struct file *filp, const char __user *buf,
 	if (count > MAX_DL_BUFFER_SIZE)
 		count = MAX_DL_BUFFER_SIZE;
 
-	if (!nfc_dev)
+	if (!nfc_dev) {
+		pr_err("%s: device doesn't exist anymore\n", __func__);
 		return -ENODEV;
+	}
 
 	mutex_lock(&nfc_dev->write_mutex);
 	if (copy_from_user(nfc_dev->write_kbuf, buf, count)) {
@@ -274,6 +323,7 @@ static const struct file_operations nfc_i2c_dev_fops = {
 	.read = nfc_i2c_dev_read,
 	.write = nfc_i2c_dev_write,
 	.open = nfc_dev_open,
+	.flush = nfc_dev_flush,
 	.release = nfc_dev_close,
 	.unlocked_ioctl = nfc_dev_ioctl,
 };
@@ -287,8 +337,10 @@ int nfc_i2c_dev_probe(struct i2c_client *client, const struct i2c_device_id *id)
 	struct platform_gpio *nfc_gpio = &nfc_configs.gpio;
 
 	pr_debug("%s: enter\n", __func__);
-
-	//retrieve details of gpios from dt
+        //#ifdef OPLUS_FEATURE_CONNFCSOFT
+        //CHECK_NFC_CHIP(SN100T);
+        //#endif /* OPLUS_FEATURE_CONNFCSOFT */
+        //retrieve details of gpios from dt
 
 	ret = nfc_parse_dt(&client->dev, &nfc_configs, PLATFORM_IF_I2C);
 	if (ret) {
@@ -545,7 +597,7 @@ static struct i2c_driver nfc_i2c_dev_driver = {
 	.probe = nfc_i2c_dev_probe,
 	.remove = nfc_i2c_dev_remove,
 	.driver = {
-		.name = NFC_I2C_DRV_STR,
+		.name = "nq-nci",
 		.pm = &nfc_i2c_dev_pm_ops,
 		.of_match_table = nfc_i2c_dev_match_table,
 		.probe_type = PROBE_PREFER_ASYNCHRONOUS,

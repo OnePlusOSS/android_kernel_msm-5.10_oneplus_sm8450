@@ -35,6 +35,7 @@ void qcom_icc_pre_aggregate(struct icc_node *node)
 		qn->max_peak[i] = 0;
 		qn->perf_mode[i] = false;
 	}
+
 }
 EXPORT_SYMBOL_GPL(qcom_icc_pre_aggregate);
 

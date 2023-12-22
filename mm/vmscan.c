@@ -1025,6 +1025,10 @@ static enum page_references page_check_references(struct page *page,
 	int ret = 0;
 
 	trace_android_vh_page_should_be_protected(page, &should_protect);
+#ifdef CONFIG_CONT_PTE_HUGEPAGE
+	if (ContPteHugePageSkipMassiveMapped(page))
+		should_protect = 1;
+#endif
 	if (unlikely(should_protect))
 		return PAGEREF_ACTIVATE;
 
@@ -1128,6 +1132,7 @@ static unsigned int shrink_page_list(struct list_head *page_list,
 	LIST_HEAD(free_pages);
 	unsigned int nr_reclaimed = 0;
 	unsigned int pgactivate = 0;
+	bool page_trylock_result;
 
 	memset(stat, 0, sizeof(*stat));
 	cond_resched();
@@ -1144,8 +1149,24 @@ static unsigned int shrink_page_list(struct list_head *page_list,
 		page = lru_to_page(page_list);
 		list_del(&page->lru);
 
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_CONT_PTE_HUGEPAGE_LRU
+		CHP_BUG_ON(sc->gfp_mask & POOL_USER_ALLOC_MASK && !ContPteCMAHugePageHead(page));
+#endif
 		if (!trylock_page(page))
 			goto keep;
+
+#ifdef CONFIG_CONT_PTE_HUGEPAGE
+		CHP_BUG_ON(PageCont(page) && !ContPteHugePageHead(page));
+
+		/*
+		 * because we don't split file-thp during reclamation, we have to
+		 * keep double mapped pages but they are quite few
+		 */
+		if (ContPteHugePageHead(page) && ContPteHugePageDoubleMap(page)) {
+			pr_debug("Shrink_page:Skip doublemap pages in memory reclamation- page:%p\n", page);
+			goto keep_locked;
+		}
+#endif
 
 		VM_BUG_ON_PAGE(PageActive(page), page);
 
@@ -1295,6 +1316,14 @@ static unsigned int shrink_page_list(struct list_head *page_list,
 					/* cannot split THP, skip it */
 					if (!can_split_huge_page(page, NULL))
 						goto activate_locked;
+
+#ifdef CONFIG_CONT_PTE_HUGEPAGE
+					if (ContPteHugePageHead(page) && ContPteHugePageDoubleMap(page)) {
+						pr_warn_ratelimited("@@@@%s anon page:%pK mapcount-0 anon:%d swapback:%d mapped:%d\n",
+							__func__, page, PageAnon(page), PageSwapBacked(page), page_mapped(page));
+						goto activate_locked;
+					}
+#else
 					/*
 					 * Split pages without a PMD map right
 					 * away. Chances are some or all of the
@@ -1304,10 +1333,21 @@ static unsigned int shrink_page_list(struct list_head *page_list,
 					    split_huge_page_to_list(page,
 								    page_list))
 						goto activate_locked;
+#endif
 				}
 				if (!add_to_swap(page)) {
+#ifndef CONFIG_CONT_PTE_HUGEPAGE
 					if (!PageTransHuge(page))
 						goto activate_locked_split;
+#else
+					/*
+					 * FIXME: For cont-pte hugepages, if swap fails to be added,
+					 * we do not split them. However, if the swap partition is
+					 * fragmented, there are no consecutive 16 slots, splitting
+					 * into small pages may reclaim more memory?
+					 */
+					goto activate_locked;
+#endif
 					/* Fallback to swap normal pages */
 					if (split_huge_page_to_list(page,
 								    page_list))
@@ -1325,8 +1365,12 @@ static unsigned int shrink_page_list(struct list_head *page_list,
 				mapping = page_mapping(page);
 			}
 		} else if (unlikely(PageTransHuge(page))) {
-			/* Split file THP */
+			/* Split file THP, for cont-pte pages, we reclaim them as a whole */
+#ifdef CONFIG_CONT_PTE_HUGEPAGE
+			if (!ContPteHugePageHead(page) && split_huge_page_to_list(page, page_list))
+#else
 			if (split_huge_page_to_list(page, page_list))
+#endif
 				goto keep_locked;
 		}
 
@@ -1353,8 +1397,14 @@ static unsigned int shrink_page_list(struct list_head *page_list,
 			if (unlikely(PageTransHuge(page)))
 				flags |= TTU_SPLIT_HUGE_PMD;
 
-			trace_android_vh_page_trylock_set(page);
+			if (!ignore_references)
+				trace_android_vh_page_trylock_set(page);
+#ifdef CONFIG_CONT_PTE_HUGEPAGE
+			/* don't struggle with doublemap cont_pte pages */
+			if ((ContPteHugePageHead(page) && ContPteHugePageDoubleMap(page)) || !try_to_unmap(page, flags)) {
+#else
 			if (!try_to_unmap(page, flags)) {
+#endif
 				stat->nr_unmap_fail += nr_pages;
 				if (!was_swapbacked && PageSwapBacked(page))
 					stat->nr_lazyfree_fail += nr_pages;
@@ -1494,13 +1544,27 @@ free_it:
 		 */
 		nr_reclaimed += nr_pages;
 
+		/* For debugging, detect the subpages' reclamation */
+#ifdef CONFIG_CONT_PTE_HUGEPAGE
+		WARN_ON(PageCont(page) && !PageHead(page));
+#endif
 		/*
 		 * Is there need to periodically free_page_list? It would
 		 * appear not as the counts should be low
 		 */
 		trace_android_vh_page_trylock_clear(page);
-		if (unlikely(PageTransHuge(page)))
+		if (unlikely(PageTransHuge(page))) {
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_POOL_ASYNC_RECLAIM
+			if (sc->gfp_mask & POOL_USER_ALLOC_MASK &&
+			    ContPteCMAHugePageHead(page))
+				pr_debug_ratelimited("@%s:%d page:%lx comm:%s pid:%d nr_reclaimed:%d @\n",
+						     __func__, __LINE__, page,
+						     current->comm,
+						     current->pid,
+						     nr_reclaimed);
+#endif
 			destroy_compound_page(page);
+		}
 		else
 			list_add(&page->lru, &free_pages);
 		continue;
@@ -1527,6 +1591,21 @@ activate_locked:
 			count_memcg_page_event(page, PGACTIVATE);
 		}
 keep_locked:
+		/*
+		 * The page with trylock-bit will be added ret_pages and
+		 * handled in trace_android_vh_handle_failed_page_trylock.
+		 * In the progress[unlock_page, handled], the page carried
+		 * with trylock-bit will cause some error-issues in other
+		 * scene, so clear trylock-bit here.
+		 * trace_android_vh_page_trylock_get_result will clear
+		 * trylock-bit and return if page tyrlock failed in
+		 * reclaim-process. Here we just want to clear trylock-bit
+		 * so that ignore page_trylock_result.
+		 * TODO: trace_android_vh_page_trylock_get_result should be
+		 * changed to a different hook which correctly reflects the
+		 * usage here, which is to clear the try-lock bit.
+		 */
+		trace_android_vh_page_trylock_get_result(page, &page_trylock_result);
 		unlock_page(page);
 keep:
 		list_add(&page->lru, &ret_pages);
@@ -1712,6 +1791,9 @@ static unsigned long isolate_lru_pages(unsigned long nr_to_scan,
 	unsigned long scan, total_scan, nr_pages;
 	LIST_HEAD(pages_skipped);
 	isolate_mode_t mode = (sc->may_unmap ? 0 : ISOLATE_UNMAPPED);
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_CONT_PTE_HUGEPAGE_LRU
+	bool chp_reclaim = !!(sc->gfp_mask & POOL_USER_ALLOC_MASK);
+#endif
 
 	total_scan = 0;
 	scan = 0;
@@ -1726,6 +1808,21 @@ static unsigned long isolate_lru_pages(unsigned long nr_to_scan,
 		nr_pages = compound_nr(page);
 		total_scan += nr_pages;
 
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_CONT_PTE_HUGEPAGE_LRU
+		if ((chp_reclaim && !ContPteCMAHugePageHead(page)) ||
+		    (!chp_reclaim && ContPteCMAHugePageHead(page)) ||
+		    (chp_reclaim && !is_chp_lruvec(lruvec)) ||
+		    (!chp_reclaim && is_chp_lruvec(lruvec))) {
+			pr_err("@@@%s:%d comm:%s pid:%d nr_to_reclaim:%ld nr_scanned:%ld nr_reclaimed:%ld"
+			       "lruvec:%lx is_chp_lruvec:%d lru:%d  ContPteCMAHugePageHead:%d POOL_USER_ALLOC:%d @\n",
+			       __func__, __LINE__, current->comm, current->pid, sc->nr_to_reclaim, sc->nr_scanned,
+			       sc->nr_reclaimed, lruvec, is_chp_lruvec(lruvec), lru, ContPteCMAHugePageHead(page),
+			       chp_reclaim);
+			CHP_BUG_ON_EMERGENCY(1);
+		}
+
+		CHP_BUG_ON(chp_reclaim && sc->order != HPAGE_CONT_PTE_ORDER);
+#endif
 		if (page_zonenum(page) > sc->reclaim_idx) {
 			list_move(&page->lru, &pages_skipped);
 			nr_skipped[page_zonenum(page)] += nr_pages;
@@ -1825,7 +1922,12 @@ int isolate_lru_page(struct page *page)
 		struct lruvec *lruvec;
 
 		spin_lock_irq(&pgdat->lru_lock);
-		lruvec = mem_cgroup_page_lruvec(page, pgdat);
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_CONT_PTE_HUGEPAGE_LRU
+		if (ContPteCMAHugePageHead(page))
+			lruvec = mem_cgroup_chp_page_lruvec(page, pgdat);
+		else
+#endif
+			lruvec = mem_cgroup_page_lruvec(page, pgdat);
 		if (PageLRU(page)) {
 			int lru = page_lru(page);
 			get_page(page);
@@ -1914,7 +2016,12 @@ static unsigned noinline_for_stack move_pages_to_lru(struct lruvec *lruvec,
 			spin_lock_irq(&pgdat->lru_lock);
 			continue;
 		}
-		lruvec = mem_cgroup_page_lruvec(page, pgdat);
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_CONT_PTE_HUGEPAGE_LRU
+		if (ContPteCMAHugePageHead(page))
+			lruvec = mem_cgroup_chp_page_lruvec(page, pgdat);
+		else
+#endif
+			lruvec = mem_cgroup_page_lruvec(page, pgdat);
 
 		SetPageLRU(page);
 		lru = page_lru(page);
@@ -1980,7 +2087,9 @@ shrink_inactive_list(unsigned long nr_to_scan, struct lruvec *lruvec,
 	enum vm_event_item item;
 	struct pglist_data *pgdat = lruvec_pgdat(lruvec);
 	bool stalled = false;
-
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_POOL_ASYNC_RECLAIM
+	bool chp_reclaim = !!(sc->gfp_mask & POOL_USER_ALLOC_MASK);
+#endif
 	while (unlikely(too_many_isolated(pgdat, file, sc))) {
 		if (stalled)
 			return 0;
@@ -1991,9 +2100,16 @@ shrink_inactive_list(unsigned long nr_to_scan, struct lruvec *lruvec,
 
 		/* We are about to die and free our memory. Return now. */
 		if (fatal_signal_pending(current))
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_POOL_ASYNC_RECLAIM
+			return chp_reclaim ?  CHP_SWAP_CLUSTER_MAX : SWAP_CLUSTER_MAX;
+#else
 			return SWAP_CLUSTER_MAX;
+#endif
 	}
-
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_POOL_ASYNC_RECLAIM
+	/* compound pages like cont_pte have got LRU drained in lru_cache_add */
+	if (!chp_reclaim)
+#endif
 	lru_add_drain();
 
 	spin_lock_irq(&pgdat->lru_lock);
@@ -2120,6 +2236,15 @@ static void shrink_active_list(unsigned long nr_to_scan,
 		}
 
 		trace_android_vh_page_referenced_check_bypass(page, nr_to_scan, lru, &bypass);
+
+#ifdef CONFIG_CONT_PTE_HUGEPAGE
+		if (ContPteHugePageSkipMassiveMapped(page))
+			bypass = 1;
+
+		/* DoubleMap page don't make page_referenced */
+		if (ContPteHugePageHead(page) && PageDoubleMap(page))
+			bypass = 1;
+#endif
 		if (bypass)
 			goto skip_page_referenced;
 		trace_android_vh_page_trylock_set(page);
@@ -2276,8 +2401,39 @@ static bool inactive_is_low(struct lruvec *lruvec, enum lru_list inactive_lru)
 	unsigned long gb;
 	bool skip = false;
 
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) &&  CONFIG_CONT_PTE_HUGEPAGE_LRU
+	/*
+	 * NOTE: Since lruvec_stat statistics are delayed,
+	 * we use lru_zone_size to calculate the size of
+	 * lru here!
+	 */
+	int zid;
+
+	inactive = active = 0;
+
+	if (!is_chp_lruvec(lruvec)) {
+		struct mem_cgroup_per_node *mz;
+
+		mz = container_of(lruvec, struct mem_cgroup_per_node, lruvec);
+
+		for (zid = 0; zid < MAX_NR_ZONES; zid++) {
+			inactive +=  READ_ONCE(mz->lru_zone_size[zid][NR_LRU_BASE + inactive_lru]);
+			active  += READ_ONCE(mz->lru_zone_size[zid][NR_LRU_BASE + active_lru]);
+		}
+	} else {
+		struct chp_lruvec *chp_lruvec;
+
+		chp_lruvec = container_of(lruvec, struct chp_lruvec, lruvec);
+
+		for (zid = 0; zid < MAX_NR_ZONES; zid++) {
+			inactive +=  READ_ONCE(chp_lruvec->lru_zone_size[zid][NR_LRU_BASE + inactive_lru]);
+			active  += READ_ONCE(chp_lruvec->lru_zone_size[zid][NR_LRU_BASE + active_lru]);
+		}
+	}
+#else
 	inactive = lruvec_page_state(lruvec, NR_LRU_BASE + inactive_lru);
 	active = lruvec_page_state(lruvec, NR_LRU_BASE + active_lru);
+#endif
 
 	gb = (inactive + active) >> (30 - PAGE_SHIFT);
 	trace_android_vh_inactive_is_low(gb, &inactive_ratio, inactive_lru, &skip);
@@ -2323,6 +2479,9 @@ static void get_scan_count(struct lruvec *lruvec, struct scan_control *sc,
 	unsigned long ap, fp;
 	enum lru_list lru;
 	bool balance_anon_file_reclaim = false;
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_POOL_ASYNC_RECLAIM
+	bool chp_reclaim = !!(sc->gfp_mask & POOL_USER_ALLOC_MASK);
+#endif
 
 	/* If we have no swap space, do not bother scanning anon pages. */
 	if (!sc->may_swap || mem_cgroup_get_nr_swap_pages(memcg) <= 0) {
@@ -2406,6 +2565,22 @@ static void get_scan_count(struct lruvec *lruvec, struct scan_control *sc,
 	denominator = ap + fp;
 out:
 	trace_android_vh_tune_scan_type((char *)(&scan_balance));
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_POOL_ASYNC_RECLAIM
+	/*
+	 * When the file hugepages is small,
+	 * the file hugepage is not reclaimed
+	 */
+	if (chp_reclaim) {
+		if (global_node_page_state(NR_FILE_THPS) * HPAGE_CONT_PTE_NR < POOL_FILE_HUGEPAGES_LIMIT) {
+			pr_debug_ratelimited("@%s:%d filehugepages:%ld limit:%ld cgroup_reclaim:%d @\n",
+					     __func__, __LINE__,
+					     global_node_page_state(NR_FILE_THPS) * HPAGE_CONT_PTE_NR,
+					     POOL_FILE_HUGEPAGES_LIMIT,
+					     cgroup_reclaim(sc));
+			scan_balance = SCAN_ANON;
+		}
+	}
+#endif
 	for_each_evictable_lru(lru) {
 		int file = is_file_lru(lru);
 		unsigned long lruvec_size;
@@ -2468,7 +2643,12 @@ out:
 			 * reclaim moving forwards, avoiding decrementing
 			 * sc->priority further than desirable.
 			 */
-			scan = max(scan, SWAP_CLUSTER_MAX);
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_POOL_ASYNC_RECLAIM
+			if (sc->gfp_mask & POOL_USER_ALLOC_MASK)
+				scan = max(scan, CHP_SWAP_CLUSTER_MAX);
+			else
+#endif
+				scan = max(scan, SWAP_CLUSTER_MAX);
 		} else {
 			scan = lruvec_size;
 		}
@@ -2479,8 +2659,14 @@ out:
 		 * If the cgroup's already been deleted, make sure to
 		 * scrape out the remaining cache.
 		 */
-		if (!scan && !mem_cgroup_online(memcg))
-			scan = min(lruvec_size, SWAP_CLUSTER_MAX);
+		if (!scan && !mem_cgroup_online(memcg)) {
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_POOL_ASYNC_RECLAIM
+			if (sc->gfp_mask & POOL_USER_ALLOC_MASK)
+				scan = min(lruvec_size, CHP_SWAP_CLUSTER_MAX);
+			else
+#endif
+				scan = min(lruvec_size, SWAP_CLUSTER_MAX);
+		}
 
 		switch (scan_balance) {
 		case SCAN_EQUAL:
@@ -2514,6 +2700,11 @@ out:
 	}
 }
 
+
+#ifdef CONFIG_CONT_PTE_HUGEPAGE
+extern bool thp_swap_is_free(void);
+#endif
+
 static void shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc)
 {
 	unsigned long nr[NR_LRU_LISTS];
@@ -2522,8 +2713,19 @@ static void shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc)
 	enum lru_list lru;
 	unsigned long nr_reclaimed = 0;
 	unsigned long nr_to_reclaim = sc->nr_to_reclaim;
+	bool proportional_reclaim;
 	struct blk_plug plug;
-	bool scan_adjusted;
+
+
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_POOL_ASYNC_RECLAIM
+	if (sc->gfp_mask & POOL_USER_ALLOC_MASK) {
+		if (!thp_swap_is_free()) {
+			pr_err_ratelimited("@FIXME: THP SWAP is full !!!  -> comm:%s pid:%d tgid:%d %s:%d @\n",
+					current->comm, current->pid, current->tgid, __func__, __LINE__);
+			return;
+		}
+	}
+#endif
 
 	get_scan_count(lruvec, sc, nr);
 
@@ -2541,8 +2743,14 @@ static void shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc)
 	 * abort proportional reclaim if either the file or anon lru has already
 	 * dropped to zero at the first pass.
 	 */
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_POOL_ASYNC_RECLAIM
+	scan_adjusted = (!cgroup_reclaim(sc) && !current_is_kswapd() &&
+			 sc->priority == DEF_PRIORITY &&
+			  !(sc->gfp_mask & POOL_USER_ALLOC_MASK));
+#else
 	scan_adjusted = (!cgroup_reclaim(sc) && !current_is_kswapd() &&
 			 sc->priority == DEF_PRIORITY);
+#endif
 
 	blk_start_plug(&plug);
 	while (nr[LRU_INACTIVE_ANON] || nr[LRU_ACTIVE_FILE] ||
@@ -2552,7 +2760,12 @@ static void shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc)
 
 		for_each_evictable_lru(lru) {
 			if (nr[lru]) {
-				nr_to_scan = min(nr[lru], SWAP_CLUSTER_MAX);
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_POOL_ASYNC_RECLAIM
+				if (sc->gfp_mask & POOL_USER_ALLOC_MASK)
+					nr_to_scan = min(nr[lru], CHP_SWAP_CLUSTER_MAX);
+				else
+#endif
+					nr_to_scan = min(nr[lru], SWAP_CLUSTER_MAX);
 				nr[lru] -= nr_to_scan;
 
 				nr_reclaimed += shrink_list(lru, nr_to_scan,
@@ -2623,9 +2836,16 @@ static void shrink_lruvec(struct lruvec *lruvec, struct scan_control *sc)
 	 * Even if we did not try to evict anon pages at all, we want to
 	 * rebalance the anon lru active/inactive ratio.
 	 */
-	if (total_swap_pages && inactive_is_low(lruvec, LRU_INACTIVE_ANON))
-		shrink_active_list(SWAP_CLUSTER_MAX, lruvec,
+	if (total_swap_pages && inactive_is_low(lruvec, LRU_INACTIVE_ANON)) {
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_POOL_ASYNC_RECLAIM
+		if (sc->gfp_mask & POOL_USER_ALLOC_MASK)
+			shrink_active_list(CHP_SWAP_CLUSTER_MAX, lruvec,
+					sc, LRU_ACTIVE_ANON);
+		else
+#endif
+			shrink_active_list(SWAP_CLUSTER_MAX, lruvec,
 				   sc, LRU_ACTIVE_ANON);
+	}
 }
 
 /* Use reclaim/compaction for costly allocs or under memory pressure */
@@ -2653,6 +2873,16 @@ static inline bool should_continue_reclaim(struct pglist_data *pgdat,
 	unsigned long pages_for_compaction;
 	unsigned long inactive_lru_pages;
 	int z;
+
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_POOL_ASYNC_RECLAIM
+	/*
+	 * cont-pte cma pool reclamation, we don't depend on compaction as we are
+	 * not buddy pages. In the other words, in_reclaim_compaction() is false
+	 * just simply like 0-order pages
+	 */
+	if (sc->gfp_mask & POOL_USER_ALLOC_MASK)
+		return false;
+#endif
 
 	/* If not in reclaim/compaction mode, stop */
 	if (!in_reclaim_compaction(sc))
@@ -2706,11 +2936,17 @@ static void shrink_node_memcgs(pg_data_t *pgdat, struct scan_control *sc)
 
 	memcg = mem_cgroup_iter(target_memcg, NULL, NULL);
 	do {
-		struct lruvec *lruvec = mem_cgroup_lruvec(memcg, pgdat);
+		struct lruvec *lruvec;
 		unsigned long reclaimed;
 		unsigned long scanned;
 		bool skip = false;
 
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_CONT_PTE_HUGEPAGE_LRU
+		if (sc->gfp_mask & POOL_USER_ALLOC_MASK)
+			lruvec = mem_cgroup_chp_lruvec(memcg, pgdat);
+		else
+#endif
+			lruvec = mem_cgroup_lruvec(memcg, pgdat);
 		/*
 		 * This loop can become CPU-bound when target memcgs
 		 * aren't eligible for reclaim - either because they
@@ -2750,8 +2986,15 @@ static void shrink_node_memcgs(pg_data_t *pgdat, struct scan_control *sc)
 
 		shrink_lruvec(lruvec, sc);
 
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_POOL_ASYNC_RECLAIM
+		/* Don't reclaim slab for cont-pte huegpage */
+		if (!(sc->gfp_mask & POOL_USER_ALLOC_MASK))
+			shrink_slab(sc->gfp_mask, pgdat->node_id, memcg,
+				sc->priority);
+#else
 		shrink_slab(sc->gfp_mask, pgdat->node_id, memcg,
 			    sc->priority);
+#endif
 
 		/* Record the group's reclaim efficiency */
 		vmpressure(sc->gfp_mask, memcg, false,
@@ -2769,7 +3012,12 @@ static void shrink_node(pg_data_t *pgdat, struct scan_control *sc)
 	bool reclaimable = false;
 	unsigned long file;
 
-	target_lruvec = mem_cgroup_lruvec(sc->target_mem_cgroup, pgdat);
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_CONT_PTE_HUGEPAGE_LRU
+	if (sc->gfp_mask & POOL_USER_ALLOC_MASK)
+		target_lruvec = mem_cgroup_chp_lruvec(sc->target_mem_cgroup, pgdat);
+	else
+#endif
+		target_lruvec = mem_cgroup_lruvec(sc->target_mem_cgroup, pgdat);
 
 again:
 	memset(&sc->nr, 0, sizeof(sc->nr));
@@ -3091,6 +3339,21 @@ static void snapshot_refaults(struct mem_cgroup *target_memcg, pg_data_t *pgdat)
 	trace_android_vh_snapshot_refaults(target_lruvec);
 }
 
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_CONT_PTE_HUGEPAGE_LRU
+static void snapshot_chp_refaults(struct mem_cgroup *target_memcg, pg_data_t *pgdat)
+{
+	struct lruvec *target_lruvec;
+	unsigned long refaults;
+
+	target_lruvec = mem_cgroup_chp_lruvec(target_memcg, pgdat);
+	refaults = lruvec_page_state(target_lruvec, WORKINGSET_ACTIVATE_ANON);
+	target_lruvec->refaults[0] = refaults;
+	refaults = lruvec_page_state(target_lruvec, WORKINGSET_ACTIVATE_FILE);
+	target_lruvec->refaults[1] = refaults;
+	trace_android_vh_snapshot_refaults(target_lruvec);
+}
+#endif
+
 /*
  * This is the main entry point to direct page reclaim.
  *
@@ -3126,11 +3389,31 @@ retry:
 		sc->nr_scanned = 0;
 		shrink_zones(zonelist, sc);
 
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_POOL_ASYNC_RECLAIM
+		if (sc->gfp_mask & POOL_USER_ALLOC_MASK &&
+		    !current_is_hybridswapd()) {
+			struct huge_page_pool *pool = cont_pte_pool();
+			/*
+			 * When thp's swap has a free slot,
+			 * we end the reclaim loop.
+			 * FIXME: support file thp limit?
+			 */
+			if (!thp_swap_is_free() ||
+			    huge_page_pool_count(pool, HPAGE_POOL_CMA) >
+			    pool->wmark[POOL_WMARK_MIN])
+				break;
+		}
+#endif
 		if (sc->nr_reclaimed >= sc->nr_to_reclaim)
 			break;
 
 		if (sc->compaction_ready)
 			break;
+
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_POOL_ASYNC_RECLAIM
+		if (current_is_hybridswapd() && sc->priority < 2)
+			break;
+#endif
 
 		/*
 		 * If we're getting trouble reclaiming, start doing
@@ -3147,13 +3430,24 @@ retry:
 			continue;
 		last_pgdat = zone->zone_pgdat;
 
-		snapshot_refaults(sc->target_mem_cgroup, zone->zone_pgdat);
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_CONT_PTE_HUGEPAGE_LRU
+		if (sc->gfp_mask & POOL_USER_ALLOC_MASK)
+			snapshot_chp_refaults(sc->target_mem_cgroup, zone->zone_pgdat);
+		else
+#endif
+			snapshot_refaults(sc->target_mem_cgroup, zone->zone_pgdat);
 
 		if (cgroup_reclaim(sc)) {
 			struct lruvec *lruvec;
 
-			lruvec = mem_cgroup_lruvec(sc->target_mem_cgroup,
-						   zone->zone_pgdat);
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_CONT_PTE_HUGEPAGE_LRU
+			if (sc->gfp_mask & POOL_USER_ALLOC_MASK)
+				lruvec = mem_cgroup_chp_lruvec(sc->target_mem_cgroup,
+						zone->zone_pgdat);
+			else
+#endif
+				lruvec = mem_cgroup_lruvec(sc->target_mem_cgroup,
+						zone->zone_pgdat);
 			clear_bit(LRUVEC_CONGESTED, &lruvec->flags);
 		}
 	}
@@ -3371,6 +3665,136 @@ unsigned long try_to_free_pages(struct zonelist *zonelist, int order,
 	return nr_reclaimed;
 }
 
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_POOL_ASYNC_RECLAIM
+static bool allow_pool_direct_reclaim(pg_data_t *pgdat)
+{
+	struct huge_page_pool *pool = cont_pte_pool();
+	bool wmark_ok;
+
+	if (pgdat->kswapd_failures >= MAX_RECLAIM_RETRIES) {
+		pr_err_ratelimited("@%s:%d comm:%s pid:%d kswapd_failures >= MAX_RECLAIM_RETRIES @\n",
+				   current->comm, current->pid, __func__, __LINE__);
+		return true;
+	}
+
+	wmark_ok = huge_page_pool_count(pool, HPAGE_POOL_CMA) > pool->wmark[POOL_WMARK_MIN] / 4;
+
+	/* kswapd must be awake if processes are being throttled */
+	if (!wmark_ok && waitqueue_active(&pgdat->kswapd_wait)) {
+		if (READ_ONCE(pgdat->kswapd_highest_zoneidx) > ZONE_NORMAL)
+			WRITE_ONCE(pgdat->kswapd_highest_zoneidx, ZONE_NORMAL);
+		pr_err_ratelimited("@%s:%d comm:%s pid:%d wakeup pgdat->kswapd_wait@\n",
+				   current->comm, current->pid, __func__, __LINE__);
+		wake_up_interruptible(&pgdat->kswapd_wait);
+	}
+
+	return wmark_ok;
+}
+
+static bool throttle_pool_direct_reclaim(gfp_t gfp_mask, struct zonelist *zonelist,
+		nodemask_t *nodemask)
+{
+	pg_data_t *pgdat = NULL;
+	struct zoneref *z;
+	struct zone *zone;
+
+	if (current->flags & PF_KTHREAD) {
+		pr_err_ratelimited("@%s:%d comm:%s pid:%d @\n",
+				    current->comm, current->pid, __func__, __LINE__);
+		goto out;
+	}
+
+	if (fatal_signal_pending(current)) {
+		pr_err_ratelimited("@%s:%d comm:%s pid:%d @\n",
+				   current->comm, current->pid, __func__, __LINE__);
+		goto out;
+	}
+
+	for_each_zone_zonelist_nodemask(zone, z, zonelist,
+			gfp_zone(gfp_mask), nodemask) {
+		if (zone_idx(zone) > ZONE_NORMAL)
+			continue;
+
+		/* Throttle based on the first usable node */
+		pgdat = zone->zone_pgdat;
+		if (allow_pool_direct_reclaim(pgdat))
+			goto out;
+		break;
+	}
+
+	if (!(gfp_mask & __GFP_FS)) {
+		wait_event_interruptible_timeout(pool_direct_reclaim_wait[pgdat->node_id],
+				allow_pool_direct_reclaim(pgdat), HZ);
+
+		goto check_pending;
+	}
+
+	/* Throttle until kswapd wakes the process */
+	wait_event_killable(pool_direct_reclaim_wait[pgdat->node_id],
+			allow_pool_direct_reclaim(pgdat));
+check_pending:
+	if (fatal_signal_pending(current))
+		return true;
+
+out:
+	return false;
+}
+
+
+/* It's similar to try_to_free_pages */
+unsigned long try_to_free_cont_pte_hugepages(struct zonelist *zonelist,
+				gfp_t gfp_mask, nodemask_t *nodemask,
+				unsigned long nr_reclaim)
+{
+	unsigned long nr_reclaimed;
+	unsigned int noreclaim_flag;
+	struct scan_control sc = {
+		.nr_to_reclaim = nr_reclaim,
+		.gfp_mask = current_gfp_context(gfp_mask) | POOL_USER_ALLOC,
+		.reclaim_idx = gfp_zone(gfp_mask),
+		.order = HPAGE_CONT_PTE_ORDER,
+		.nodemask = nodemask,
+		.priority = POOL_DIRECT_RECLAIM_PRIORITY,
+		.may_writepage = !laptop_mode,
+		.may_unmap = 1,
+		.may_swap = 1,
+	};
+
+	/*
+	 * scan_control uses s8 fields for order, priority, and reclaim_idx.
+	 * Confirm they are large enough for max values.
+	 */
+	BUILD_BUG_ON(MAX_ORDER > S8_MAX);
+	BUILD_BUG_ON(DEF_PRIORITY > S8_MAX);
+	BUILD_BUG_ON(MAX_NR_ZONES > S8_MAX);
+
+	cond_resched();
+
+	fs_reclaim_acquire(gfp_mask);
+	noreclaim_flag = memalloc_noreclaim_save();
+
+	/* FIXME: Whether throttle direct reclaim is needed? */
+	if (throttle_pool_direct_reclaim(sc.gfp_mask, zonelist, nodemask))
+		return 1;
+
+	/* FIXME: no thp swap? Whether to consider file thp? */
+	if (!thp_swap_is_free())
+		return 0;
+
+	atomic64_add(1, &perf_stat.direct_reclaim_stat[POOL_DIRECT_RECLAIM_ENTER]);
+	set_task_reclaim_state(current, &sc.reclaim_state);
+	nr_reclaimed = do_try_to_free_pages(zonelist, &sc);
+	set_task_reclaim_state(current, NULL);
+
+	memalloc_noreclaim_restore(noreclaim_flag);
+	fs_reclaim_release(gfp_mask);
+
+	cond_resched();
+
+	return nr_reclaimed;
+}
+#endif /* defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_POOL_ASYNC_RECLAIM */
+
 #ifdef CONFIG_MEMCG
 
 /* Only used by soft limit reclaim. Do not reuse for anything else. */
@@ -3379,6 +3803,7 @@ unsigned long mem_cgroup_shrink_node(struct mem_cgroup *memcg,
 						pg_data_t *pgdat,
 						unsigned long *nr_scanned)
 {
+	/* FIXME: chp lruvec */
 	struct lruvec *lruvec = mem_cgroup_lruvec(memcg, pgdat);
 	struct scan_control sc = {
 		.nr_to_reclaim = SWAP_CLUSTER_MAX,
@@ -3438,6 +3863,13 @@ unsigned long try_to_free_mem_cgroup_pages(struct mem_cgroup *memcg,
 	 */
 	struct zonelist *zonelist = node_zonelist(numa_node_id(), sc.gfp_mask);
 
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_POOL_ASYNC_RECLAIM
+	if (gfp_mask & POOL_USER_ALLOC_MASK) {
+		sc.gfp_mask |= POOL_USER_ALLOC_MASK;
+		sc.order = HPAGE_CONT_PTE_ORDER;
+	}
+#endif
+
 	set_task_reclaim_state(current, &sc.reclaim_state);
 	trace_mm_vmscan_memcg_reclaim_begin(0, sc.gfp_mask);
 	noreclaim_flag = memalloc_noreclaim_save();
@@ -3458,19 +3890,38 @@ static void age_active_anon(struct pglist_data *pgdat,
 {
 	struct mem_cgroup *memcg;
 	struct lruvec *lruvec;
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_CONT_PTE_HUGEPAGE_LRU
+	bool chp_reclaim = !!(sc->gfp_mask & POOL_USER_ALLOC_MASK);
+#endif
 
 	if (!total_swap_pages)
 		return;
 
-	lruvec = mem_cgroup_lruvec(NULL, pgdat);
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_CONT_PTE_HUGEPAGE_LRU
+	if (chp_reclaim)
+		lruvec = mem_cgroup_chp_lruvec(NULL, pgdat);
+	else
+#endif
+		lruvec = mem_cgroup_lruvec(NULL, pgdat);
 	if (!inactive_is_low(lruvec, LRU_INACTIVE_ANON))
 		return;
 
 	memcg = mem_cgroup_iter(NULL, NULL, NULL);
 	do {
-		lruvec = mem_cgroup_lruvec(memcg, pgdat);
-		shrink_active_list(SWAP_CLUSTER_MAX, lruvec,
-				   sc, LRU_ACTIVE_ANON);
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_CONT_PTE_HUGEPAGE_LRU
+		if (chp_reclaim)
+			lruvec = mem_cgroup_chp_lruvec(memcg, pgdat);
+		else
+#endif
+			lruvec = mem_cgroup_lruvec(memcg, pgdat);
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_POOL_ASYNC_RECLAIM
+		if (chp_reclaim)
+			shrink_active_list(CHP_SWAP_CLUSTER_MAX, lruvec,
+					sc, LRU_ACTIVE_ANON);
+		else
+#endif
+			shrink_active_list(SWAP_CLUSTER_MAX, lruvec,
+					sc, LRU_ACTIVE_ANON);
 		memcg = mem_cgroup_iter(NULL, memcg, NULL);
 	} while (memcg);
 }
@@ -3509,6 +3960,17 @@ static bool pgdat_balanced(pg_data_t *pgdat, int order, int highest_zoneidx)
 	unsigned long mark = -1;
 	struct zone *zone;
 
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_POOL_ASYNC_RECLAIM
+	if (order == HPAGE_CONT_PTE_ORDER &&
+	    test_bit(PGDAT_POOL_USER_ALLOC, &pgdat->flags)) {
+		struct huge_page_pool *pool = cont_pte_pool();
+
+		if (huge_page_pool_count(pool, HPAGE_POOL_CMA) < pool->wmark[POOL_WMARK_HIGH] && thp_swap_is_free())
+			return false;
+		else
+			return true;
+	}
+#endif
 	/*
 	 * Check watermarks bottom-up as lower zones are more likely to
 	 * meet watermarks.
@@ -3545,6 +4007,17 @@ static void clear_pgdat_congested(pg_data_t *pgdat)
 	clear_bit(PGDAT_WRITEBACK, &pgdat->flags);
 }
 
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_CONT_PTE_HUGEPAGE_LRU
+static void clear_chp_pgdat_congested(pg_data_t *pgdat)
+{
+	struct lruvec *lruvec = mem_cgroup_chp_lruvec(NULL, pgdat);
+
+	clear_bit(LRUVEC_CONGESTED, &lruvec->flags);
+	clear_bit(PGDAT_DIRTY, &pgdat->flags);
+	clear_bit(PGDAT_WRITEBACK, &pgdat->flags);
+}
+#endif
+
 /*
  * Prepare kswapd for sleeping. This verifies that there are no processes
  * waiting in throttle_direct_reclaim() and that watermarks have been met.
@@ -3567,6 +4040,18 @@ static bool prepare_kswapd_sleep(pg_data_t *pgdat, int order,
 	 * throttled again. The difference from wake ups in balance_pgdat() is
 	 * that here we are under prepare_to_wait().
 	 */
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_POOL_ASYNC_RECLAIM
+	if (order == HPAGE_CONT_PTE_ORDER &&
+			test_bit(PGDAT_POOL_USER_ALLOC, &pgdat->flags)) {
+		if (waitqueue_active(&pool_direct_reclaim_wait[pgdat->node_id])) {
+			struct huge_page_pool *pool = cont_pte_pool();
+
+			pr_debug_ratelimited("@%s:%d -> wake_up pool_direct_reclaim_wait count:%d wmark_min=%d @\n",
+					__func__, __LINE__, huge_page_pool_count(pool, HPAGE_POOL_CMA), pool->wmark[POOL_WMARK_MIN]);
+			wake_up_all(&pool_direct_reclaim_wait[pgdat->node_id]);
+		}
+	} else
+#endif
 	if (waitqueue_active(&pgdat->pfmemalloc_wait))
 		wake_up_all(&pgdat->pfmemalloc_wait);
 
@@ -3575,7 +4060,13 @@ static bool prepare_kswapd_sleep(pg_data_t *pgdat, int order,
 		return true;
 
 	if (pgdat_balanced(pgdat, order, highest_zoneidx)) {
-		clear_pgdat_congested(pgdat);
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_CONT_PTE_HUGEPAGE_LRU
+		if (order == HPAGE_CONT_PTE_ORDER &&
+		    test_bit(PGDAT_POOL_USER_ALLOC, &pgdat->flags))
+			clear_chp_pgdat_congested(pgdat);
+		else
+#endif
+			clear_pgdat_congested(pgdat);
 		return true;
 	}
 
@@ -3598,13 +4089,23 @@ static bool kswapd_shrink_node(pg_data_t *pgdat,
 
 	/* Reclaim a number of pages proportional to the number of zones */
 	sc->nr_to_reclaim = 0;
-	for (z = 0; z <= sc->reclaim_idx; z++) {
-		zone = pgdat->node_zones + z;
-		if (!managed_zone(zone))
-			continue;
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_POOL_ASYNC_RECLAIM
+	/* FIXME: need kswapd reclaim to wmark_high of pool?*/
+	if (sc->gfp_mask & POOL_USER_ALLOC_MASK) {
+		struct huge_page_pool *pool = cont_pte_pool();
 
-		sc->nr_to_reclaim += max(high_wmark_pages(zone), SWAP_CLUSTER_MAX);
-	}
+		/* FIXME: We only recclaim half of the wmark_high! */
+		sc->nr_to_reclaim = (pool->wmark[POOL_WMARK_HIGH] * HPAGE_CONT_PTE_NR) / 2;
+	} else
+#endif
+		for (z = 0; z <= sc->reclaim_idx; z++) {
+			zone = pgdat->node_zones + z;
+			if (!managed_zone(zone))
+				continue;
+
+			sc->nr_to_reclaim += max(high_wmark_pages(zone), SWAP_CLUSTER_MAX);
+		}
+
 
 	/*
 	 * Historically care was taken to put equal pressure on all zones but
@@ -3619,11 +4120,23 @@ static bool kswapd_shrink_node(pg_data_t *pgdat,
 	 * excessive reclaim. Assume that a process requested a high-order
 	 * can direct reclaim/compact.
 	 */
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_POOL_ASYNC_RECLAIM
+	if (!(sc->gfp_mask & POOL_USER_ALLOC_MASK))
+#endif
 	if (sc->order && sc->nr_reclaimed >= compact_gap(sc->order))
 		sc->order = 0;
 
 	return sc->nr_scanned >= sc->nr_to_reclaim;
 }
+
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_POOL_ASYNC_RECLAIM
+/* perf: a chp stub for splitting backtraces of  basepage and hugepages */
+static noinline bool kswapd_chp_shrink_node(pg_data_t *pgdat,
+			       struct scan_control *sc)
+{
+	return kswapd_shrink_node(pgdat, sc);
+}
+#endif
 
 /*
  * For kswapd, balance_pgdat() will reclaim pages across a node from zones
@@ -3653,12 +4166,36 @@ static int balance_pgdat(pg_data_t *pgdat, int order, int highest_zoneidx)
 		.order = order,
 		.may_unmap = 1,
 	};
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_POOL_ASYNC_RECLAIM
+	s64 time;
+	s64 reclaim_seq;
+#endif
 
 	set_task_reclaim_state(current, &sc.reclaim_state);
 	psi_memstall_enter(&pflags);
 	__fs_reclaim_acquire();
 
 	count_vm_event(PAGEOUTRUN);
+
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_POOL_ASYNC_RECLAIM
+	if (order == HPAGE_CONT_PTE_ORDER &&
+	    test_bit(PGDAT_POOL_USER_ALLOC, &pgdat->flags)) {
+		sc.gfp_mask |= POOL_USER_ALLOC;
+
+		/* FIXME: no thp swap? Whether to consider file thp? */
+		if (!thp_swap_is_free()) {
+			__fs_reclaim_release();
+			psi_memstall_leave(&pflags);
+			set_task_reclaim_state(current, NULL);
+
+			return sc.order;
+		}
+
+		time = ktime_to_ms(ktime_get());
+		atomic64_add(1, &perf_stat.reclaim_seq[POOL_KSWAPD_RECLAIM]);
+		reclaim_seq = atomic64_read(&perf_stat.reclaim_seq[POOL_KSWAPD_RECLAIM]);
+	}
+#endif
 
 	/*
 	 * Account for the reclaim boost. Note that the zone boost is left in
@@ -3720,6 +4257,17 @@ restart:
 			goto restart;
 		}
 
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_POOL_ASYNC_RECLAIM
+		if (sc.gfp_mask & POOL_USER_ALLOC_MASK) {
+			/*
+			 * When thp's swap has no free slot,
+			 * we end the reclaim loop.
+			 * FIXME: support file thp limit?
+			 */
+			if (balanced || !thp_swap_is_free())
+				goto out;
+		}
+#endif
 		/*
 		 * If boosting is not active then only reclaim if there are no
 		 * eligible zones. Note that sc.reclaim_idx is not used as
@@ -3768,6 +4316,12 @@ restart:
 		 * enough pages are already being scanned that that high
 		 * watermark would be met at 100% efficiency.
 		 */
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_POOL_ASYNC_RECLAIM
+		if (sc.gfp_mask & POOL_USER_ALLOC_MASK) {
+			if (kswapd_chp_shrink_node(pgdat, &sc))
+				raise_priority = false;
+		} else
+#endif
 		if (kswapd_shrink_node(pgdat, &sc))
 			raise_priority = false;
 
@@ -3776,6 +4330,14 @@ restart:
 		 * to be throttled on pfmemalloc_wait as they should not be
 		 * able to safely make forward progress. Wake them
 		 */
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_POOL_ASYNC_RECLAIM
+		if (sc.gfp_mask & POOL_USER_ALLOC_MASK) {
+			if (waitqueue_active(&pool_direct_reclaim_wait[pgdat->node_id]) &&
+				allow_pool_direct_reclaim(pgdat)) {
+				wake_up_all(&pool_direct_reclaim_wait[pgdat->node_id]);
+			}
+		} else
+#endif
 		if (waitqueue_active(&pgdat->pfmemalloc_wait) &&
 				allow_direct_reclaim(pgdat))
 			wake_up_all(&pgdat->pfmemalloc_wait);
@@ -3810,6 +4372,13 @@ restart:
 		pgdat->kswapd_failures++;
 
 out:
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_POOL_ASYNC_RECLAIM
+	if (sc.gfp_mask & POOL_USER_ALLOC_MASK) {
+		atomic64_set(&perf_stat.reclaim_count[POOL_KSWAPD_RECLAIM][reclaim_seq % POOL_RECLAIM_SEQ_ITEM], sc.nr_reclaimed);
+		perf_stat.reclaim_time[POOL_KSWAPD_RECLAIM][reclaim_seq % POOL_RECLAIM_SEQ_ITEM] = ktime_to_ms(ktime_get()) - time;
+	}
+#endif
+
 	/* If reclaim was boosted, account for the reclaim done in this pass */
 	if (boosted) {
 		unsigned long flags;
@@ -3832,7 +4401,12 @@ out:
 		wakeup_kcompactd(pgdat, pageblock_order, highest_zoneidx);
 	}
 
-	snapshot_refaults(NULL, pgdat);
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_CONT_PTE_HUGEPAGE_LRU
+	if (sc.gfp_mask & POOL_USER_ALLOC_MASK)
+		snapshot_chp_refaults(NULL, pgdat);
+	else
+#endif
+		snapshot_refaults(NULL, pgdat);
 	__fs_reclaim_release();
 	psi_memstall_leave(&pflags);
 	set_task_reclaim_state(current, NULL);
@@ -3888,6 +4462,15 @@ static void kswapd_try_to_sleep(pg_data_t *pgdat, int alloc_order, int reclaim_o
 		 */
 		reset_isolation_suitable(pgdat);
 
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_POOL_ASYNC_RECLAIM
+		/*
+		 * We have freed the memory, now we should clear PGDAT_POOL_USER_ALLOC.
+		 */
+		if (alloc_order == HPAGE_CONT_PTE_ORDER &&
+		    test_bit(PGDAT_POOL_USER_ALLOC, &pgdat->flags))
+			clear_bit(PGDAT_POOL_USER_ALLOC, &pgdat->flags);
+		else
+#endif
 		/*
 		 * We have freed the memory, now we should compact it to make
 		 * allocation of the requested order possible.
@@ -3983,7 +4566,6 @@ static int kswapd(void *p)
 	 */
 	tsk->flags |= PF_MEMALLOC | PF_SWAPWRITE | PF_KSWAPD;
 	set_freezable();
-
 	WRITE_ONCE(pgdat->kswapd_order, 0);
 	WRITE_ONCE(pgdat->kswapd_highest_zoneidx, MAX_NR_ZONES);
 	for ( ; ; ) {
@@ -3992,7 +4574,6 @@ static int kswapd(void *p)
 		alloc_order = reclaim_order = READ_ONCE(pgdat->kswapd_order);
 		highest_zoneidx = kswapd_highest_zoneidx(pgdat,
 							highest_zoneidx);
-
 kswapd_try_sleep:
 		kswapd_try_to_sleep(pgdat, alloc_order, reclaim_order,
 					highest_zoneidx);
@@ -4001,6 +4582,7 @@ kswapd_try_sleep:
 		alloc_order = reclaim_order = READ_ONCE(pgdat->kswapd_order);
 		highest_zoneidx = kswapd_highest_zoneidx(pgdat,
 							highest_zoneidx);
+
 		WRITE_ONCE(pgdat->kswapd_order, 0);
 		WRITE_ONCE(pgdat->kswapd_highest_zoneidx, MAX_NR_ZONES);
 
@@ -4107,6 +4689,14 @@ void wakeup_kswapd(struct zone *zone, gfp_t gfp_flags, int order,
 	if (!waitqueue_active(&pgdat->kswapd_wait))
 		return;
 
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_POOL_ASYNC_RECLAIM
+	/* It starts with real sleep and ends with sleep */
+	if (gfp_flags & POOL_USER_ALLOC_MASK) {
+		set_bit(PGDAT_POOL_USER_ALLOC, &pgdat->flags);
+		gfp_flags &= ~POOL_USER_ALLOC_MASK;
+	}
+#endif
+
 	/* Hopeless node, leave it to direct reclaim if possible */
 	if (pgdat->kswapd_failures >= MAX_RECLAIM_RETRIES ||
 	    (pgdat_balanced(pgdat, order, highest_zoneidx) &&
@@ -4120,12 +4710,21 @@ void wakeup_kswapd(struct zone *zone, gfp_t gfp_flags, int order,
 		 */
 		if (!(gfp_flags & __GFP_DIRECT_RECLAIM))
 			wakeup_kcompactd(pgdat, order, highest_zoneidx);
+
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_POOL_ASYNC_RECLAIM
+		test_and_clear_bit(PGDAT_POOL_USER_ALLOC, &pgdat->flags);
+#endif
+
 		return;
 	}
 
 	trace_mm_vmscan_wakeup_kswapd(pgdat->node_id, highest_zoneidx, order,
 				      gfp_flags);
 	wake_up_interruptible(&pgdat->kswapd_wait);
+
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_POOL_ASYNC_RECLAIM
+	atomic64_add(1, &perf_stat.kswapd_wakeup_count);
+#endif
 }
 
 #ifdef CONFIG_HIBERNATION
@@ -4321,7 +4920,10 @@ static int __node_reclaim(struct pglist_data *pgdat, gfp_t gfp_mask, unsigned in
 		.may_swap = 1,
 		.reclaim_idx = gfp_zone(gfp_mask),
 	};
-
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_POOL_ASYNC_RECLAIM
+	if (sc.gfp_mask & POOL_USER_ALLOC_MASK)
+		sc.nr_to_reclaim = max(nr_pages, CHP_SWAP_CLUSTER_MAX);
+#endif
 	trace_mm_vmscan_node_reclaim_begin(pgdat->node_id, order,
 					   sc.gfp_mask);
 
@@ -4437,7 +5039,12 @@ void check_move_unevictable_pages(struct pagevec *pvec)
 			pgdat = pagepgdat;
 			spin_lock_irq(&pgdat->lru_lock);
 		}
-		lruvec = mem_cgroup_page_lruvec(page, pgdat);
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_CONT_PTE_HUGEPAGE_LRU
+		if (ContPteCMAHugePageHead(page))
+			lruvec = mem_cgroup_chp_page_lruvec(page, pgdat);
+		else
+#endif
+			lruvec = mem_cgroup_page_lruvec(page, pgdat);
 
 		if (!PageLRU(page) || !PageUnevictable(page))
 			continue;

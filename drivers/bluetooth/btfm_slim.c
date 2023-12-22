@@ -24,7 +24,7 @@
 #define DELAY_FOR_PORT_OPEN_MS (200)
 #define SLIM_MANF_ID_QCOM	0x217
 #define SLIM_PROD_CODE		0x221
-#define BT_CMD_SLIM_TEST		0xbfac
+#define BT_CMD_SLIM_TEST        0xbfac
 
 struct class *btfm_slim_class;
 static int btfm_slim_major;
@@ -170,6 +170,7 @@ int btfm_slim_disable_ch(struct btfmslim *btfmslim, struct btfmslim_ch *ch,
 			uint8_t rxport, uint8_t nchan)
 {
 	int ret, i;
+
 	int chipset_ver = 0;
 
 	if (!btfmslim || !ch)

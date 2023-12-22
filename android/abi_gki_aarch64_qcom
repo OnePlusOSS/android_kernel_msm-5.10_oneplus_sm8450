@@ -129,6 +129,7 @@
   cgroup_path_ns
   cgroup_taskset_first
   cgroup_taskset_next
+  check_move_unevictable_pages
   __check_object_size
   check_preempt_curr
   check_zeroed_user
@@ -1659,6 +1660,7 @@
   page_endio
   page_mapping
   __page_pinner_migration_failed
+  __pagevec_release
   panic
   panic_notifier_list
   panic_timeout
@@ -3043,6 +3045,7 @@
   ww_mutex_lock
   ww_mutex_unlock
   __xa_alloc
+  __xa_alloc_cyclic
   xa_destroy
   xa_erase
   xa_find
@@ -3064,3 +3067,25 @@
   xhci_trb_virt_to_dma
   zone_watermark_ok
   zone_watermark_ok_safe
+__hid_register_driver
+__hid_request
+filp_close
+filp_open
+hid_hw_start
+hid_open_report
+hid_unregister_driver
+i2c_smbus_read_byte_data
+i2c_smbus_read_i2c_block_data
+i2c_smbus_read_word_data
+i2c_smbus_write_byte_data
+i2c_smbus_write_i2c_block_data
+i2c_smbus_write_word_data
+iio_channel_get
+input_ff_create_memless
+rtc_class_close
+rtc_class_open
+rtc_read_time
+rtc_valid_tm
+simple_strtoul
+stpcpy
+#endif

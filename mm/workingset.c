@@ -262,7 +262,12 @@ void *workingset_eviction(struct page *page, struct mem_cgroup *target_memcg)
 	VM_BUG_ON_PAGE(page_count(page), page);
 	VM_BUG_ON_PAGE(!PageLocked(page), page);
 
-	lruvec = mem_cgroup_lruvec(target_memcg, pgdat);
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_CONT_PTE_HUGEPAGE_LRU
+	if (ContPteCMAHugePageHead(page))
+		lruvec = mem_cgroup_chp_lruvec(target_memcg, pgdat);
+	else
+#endif
+		lruvec = mem_cgroup_lruvec(target_memcg, pgdat);
 	workingset_age_nonresident(lruvec, thp_nr_pages(page));
 	/* XXX: target_memcg can be NULL, go through lruvec */
 	memcgid = mem_cgroup_id(lruvec_memcg(lruvec));
@@ -316,7 +321,12 @@ void workingset_refault(struct page *page, void *shadow)
 	eviction_memcg = mem_cgroup_from_id(memcgid);
 	if (!mem_cgroup_disabled() && !eviction_memcg)
 		goto out;
-	eviction_lruvec = mem_cgroup_lruvec(eviction_memcg, pgdat);
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_CONT_PTE_HUGEPAGE_LRU
+	if (ContPteCMAHugePageHead(page))
+		eviction_lruvec = mem_cgroup_chp_lruvec(eviction_memcg, pgdat);
+	else
+#endif
+		eviction_lruvec = mem_cgroup_lruvec(eviction_memcg, pgdat);
 	refault = atomic_long_read(&eviction_lruvec->nonresident_age);
 
 	/*
@@ -346,7 +356,12 @@ void workingset_refault(struct page *page, void *shadow)
 	 * is actually experiencing the refault event.
 	 */
 	memcg = page_memcg(page);
-	lruvec = mem_cgroup_lruvec(memcg, pgdat);
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_CONT_PTE_HUGEPAGE_LRU
+	if (ContPteCMAHugePageHead(page))
+		lruvec = mem_cgroup_chp_lruvec(memcg, pgdat);
+	else
+#endif
+		lruvec = mem_cgroup_lruvec(memcg, pgdat);
 
 	inc_lruvec_state(lruvec, WORKINGSET_REFAULT_BASE + file);
 
@@ -374,7 +389,15 @@ void workingset_refault(struct page *page, void *shadow)
 		goto out;
 
 	SetPageActive(page);
+#ifdef CONFIG_CONT_PTE_HUGEPAGE
+	/*
+	 * NOTE: The cont_pte_nr_pages is used to support
+	 * cont-pte hugepages with intermediate states!
+	 */
+	workingset_age_nonresident(lruvec, cont_pte_nr_pages(page));
+#else
 	workingset_age_nonresident(lruvec, thp_nr_pages(page));
+#endif
 	inc_lruvec_state(lruvec, WORKINGSET_ACTIVATE_BASE + file);
 
 	/* Page was active prior to eviction */
@@ -410,7 +433,12 @@ void workingset_activation(struct page *page)
 	memcg = page_memcg_rcu(page);
 	if (!mem_cgroup_disabled() && !memcg)
 		goto out;
-	lruvec = mem_cgroup_page_lruvec(page, page_pgdat(page));
+#if defined(CONFIG_CONT_PTE_HUGEPAGE) && CONFIG_CONT_PTE_HUGEPAGE_LRU
+	if (ContPteCMAHugePageHead(page))
+		lruvec = mem_cgroup_chp_page_lruvec(page, page_pgdat(page));
+	else
+#endif
+		lruvec = mem_cgroup_page_lruvec(page, page_pgdat(page));
 	workingset_age_nonresident(lruvec, thp_nr_pages(page));
 out:
 	rcu_read_unlock();
@@ -491,6 +519,7 @@ static unsigned long count_shadow_nodes(struct shrinker *shrinker,
 		struct lruvec *lruvec;
 		int i;
 
+		/* FIXME: chp lruvec! */
 		lruvec = mem_cgroup_lruvec(sc->memcg, NODE_DATA(sc->nid));
 		for (pages = 0, i = 0; i < NR_LRU_LISTS; i++)
 			pages += lruvec_page_state_local(lruvec,
@@ -557,7 +586,9 @@ static enum lru_status shadow_lru_isolate(struct list_head *item,
 		goto out_invalid;
 	if (WARN_ON_ONCE(node->count != node->nr_values))
 		goto out_invalid;
+#ifndef CONFIG_CONT_PTE_HUGEPAGE
 	mapping->nrexceptional -= node->nr_values;
+#endif
 	xa_delete_node(node, workingset_update_node);
 	__inc_lruvec_slab_state(node, WORKINGSET_NODERECLAIM);
 

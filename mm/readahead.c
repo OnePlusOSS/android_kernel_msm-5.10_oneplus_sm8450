@@ -140,6 +140,17 @@ static void read_pages(struct readahead_control *rac, struct list_head *pages,
 		aops->readahead(rac);
 		/* Clean up the remaining pages */
 		while ((page = readahead_page(rac))) {
+#ifdef CONFIG_CONT_PTE_HUGEPAGE
+			if (PageCont(page)) {
+				pr_err("@@@FIXME: %s readahead_page page:%pK pfn:%lx flags:%lx ref:%d index:%lx process:%s %d compound_head:%lx %pK cma:%d\n",
+						__func__, page, page_to_pfn(page), page->flags, atomic_read(&page->_refcount),
+						page->index, current->comm, current->pid, page->compound_head, compound_head(page),
+						within_cont_pte_cma(page_to_pfn(page)));
+				dump_page(page, "THP readahead_page");
+				dump_page(compound_head(page), "THP readahead_page head");
+				CHP_BUG_ON(1);
+			}
+#endif
 			unlock_page(page);
 			put_page(page);
 		}
@@ -451,6 +462,17 @@ static void ondemand_readahead(struct readahead_control *ractl,
 	unsigned long add_pages;
 	unsigned long index = readahead_index(ractl);
 	pgoff_t prev_index;
+
+#ifdef CONFIG_CONT_PTE_HUGEPAGE
+	/* prevent syscall from read hugepages ahead */
+	if (ractl->mapping && ractl->mapping->host && ractl->mapping->host->may_cont_pte) {
+		ra->start = index;
+		ra->size = CONT_PTES - (index % CONT_PTES);
+		ra->async_size = 0;
+		do_page_cache_ra(ractl, ra->size, ra->async_size);
+		return;
+	}
+#endif
 
 	/*
 	 * If the request exceeds the readahead window, allow the read to

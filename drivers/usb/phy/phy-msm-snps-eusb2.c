@@ -676,7 +676,17 @@ static int msm_eusb2_repeater_reset_and_init(struct msm_eusb2_phy *phy)
 	if (ret)
 		dev_err(phy->phy.dev, "repeater reset failed.\n");
 
+#ifndef OPLUS_FEATURE_CHG_BASIC
 	ret = usb_repeater_init(phy->ur);
+#else
+	if (phy->phy.flags & PHY_HOST_MODE) {
+		dev_info(phy->phy.dev, "Init usb-repeater in HOST mode.\n");
+		usb_repeater_init_with_mode(phy->ur, OPLUS_REPEATER_PARAM_HOST);
+	}else {
+		dev_info(phy->phy.dev, "Init usb-repeater in DEVICE mode.\n");
+		usb_repeater_init_with_mode(phy->ur, OPLUS_REPEATER_PARAM_DEVICE);
+	}
+#endif
 	if (ret)
 		dev_err(phy->phy.dev, "repeater init failed.\n");
 

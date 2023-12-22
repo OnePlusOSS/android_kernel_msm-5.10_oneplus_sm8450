@@ -110,3 +110,6 @@ obj-$(CONFIG_LEDS_USER)			+= uleds.o
 
 # LED Triggers
 obj-$(CONFIG_LEDS_TRIGGERS)		+= trigger/
+
+# aw210xx led
+obj-$(CONFIG_LEDS_AW210XX) += aw210xx/

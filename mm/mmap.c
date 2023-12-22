@@ -880,7 +880,11 @@ int __vma_adjust(struct vm_area_struct *vma, unsigned long start,
 		}
 	}
 again:
+#ifdef CONFIG_CONT_PTE_HUGEPAGE
+	vma_adjust_cont_pte_trans_huge(orig_vma, start, end, adjust_next);
+#else
 	vma_adjust_trans_huge(orig_vma, start, end, adjust_next);
+#endif
 
 	if (file) {
 		mapping = file->f_mapping;
@@ -1552,6 +1556,15 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 		if (!file_mmap_ok(file, inode, pgoff, len))
 			return -EOVERFLOW;
 
+#ifdef CONFIG_CONT_PTE_HUGEPAGE
+		/* jar is first mapped as R+W, then W is removed. but actually Android has
+		 * never written it. ignore WRITE and make jar eligible for hugepages.
+		 * Note: Ideally, we should fix it in Android.
+		 */
+		if (inode->may_cont_pte == JAR_HUGE)
+			vm_flags &= ~VM_WRITE;
+#endif
+
 		flags_mask = LEGACY_MAP_MASK | file->f_op->mmap_supported_flags;
 
 		switch (flags & MAP_TYPE) {
@@ -1760,8 +1773,12 @@ int vma_wants_writenotify(struct vm_area_struct *vma, pgprot_t vm_page_prot)
 	    pgprot_val(vm_pgprot_modify(vm_page_prot, vm_flags)))
 		return 0;
 
-	/* Do we need to track softdirty? */
-	if (IS_ENABLED(CONFIG_MEM_SOFT_DIRTY) && !(vm_flags & VM_SOFTDIRTY))
+	/*
+	 * Do we need to track softdirty? hugetlb does not support softdirty
+	 * tracking yet.
+	 */
+	if (IS_ENABLED(CONFIG_MEM_SOFT_DIRTY) && !(vm_flags & VM_SOFTDIRTY) &&
+	    !is_vm_hugetlb_page(vma))
 		return 1;
 
 	/* Specialty mapping? */
@@ -1919,7 +1936,7 @@ unsigned long mmap_region(struct file *file, unsigned long addr,
 	if (!arch_validate_flags(vma->vm_flags)) {
 		error = -EINVAL;
 		if (file)
-			goto unmap_and_free_vma;
+			goto close_and_free_vma;
 		else
 			goto free_vma;
 	}
@@ -1968,13 +1985,15 @@ out:
 
 	return addr;
 
+close_and_free_vma:
+	if (vma->vm_ops && vma->vm_ops->close)
+		vma->vm_ops->close(vma);
 unmap_and_free_vma:
 	vma->vm_file = NULL;
 	fput(file);
 
 	/* Undo any partial mapping done by a device driver. */
 	unmap_region(mm, vma, prev, vma->vm_start, vma->vm_end);
-	charged = 0;
 	if (vm_flags & VM_SHARED)
 		mapping_unmap_writable(file->f_mapping);
 allow_write_and_free_vma:
@@ -2245,7 +2264,20 @@ arch_get_unmapped_area(struct file *filp, unsigned long addr,
 	if (flags & MAP_FIXED)
 		return addr;
 
+#ifndef CONFIG_CONT_PTE_HUGEPAGE
 	if (addr) {
+#else
+	/*
+	 * xxx
+	 * Android BOOTIMAGE will advise an address lower than 4GB
+	 * in art, we have adjusted the address to make boot-frame
+	 * work.oat aligned with 64KB, but boot-framework is not
+	 * the first oat, so the start address of bootimages might
+	 * be not aligned, we take art's advise here
+	 */
+	if (addr && (IS_ALIGNED(addr, CONT_PTE_SIZE) ||
+		     addr < 0x100000000ULL)) {
+#endif
 		addr = PAGE_ALIGN(addr);
 		vma = find_vma_prev(mm, addr, &prev);
 		if (mmap_end - len >= addr && addr >= mmap_min_addr &&
@@ -2258,8 +2290,12 @@ arch_get_unmapped_area(struct file *filp, unsigned long addr,
 	info.length = len;
 	info.low_limit = mm->mmap_base;
 	info.high_limit = mmap_end;
-	info.align_mask = 0;
 	info.align_offset = 0;
+#ifndef CONFIG_CONT_PTE_HUGEPAGE
+	info.align_mask = 0;
+#else
+	handle_chp_get_unmapped_area(&info, filp, pgoff);
+#endif
 	return vm_unmapped_area(&info);
 }
 #endif
@@ -2286,8 +2322,13 @@ arch_get_unmapped_area_topdown(struct file *filp, unsigned long addr,
 	if (flags & MAP_FIXED)
 		return addr;
 
-	/* requesting a specific address */
+	/* requesting a specific address, and also read xxx*/
+#ifndef CONFIG_CONT_PTE_HUGEPAGE
 	if (addr) {
+#else
+	if (addr && (IS_ALIGNED(addr, CONT_PTE_SIZE) ||
+		     addr < 0x100000000ULL)) {
+#endif
 		addr = PAGE_ALIGN(addr);
 		vma = find_vma_prev(mm, addr, &prev);
 		if (mmap_end - len >= addr && addr >= mmap_min_addr &&
@@ -2300,8 +2341,12 @@ arch_get_unmapped_area_topdown(struct file *filp, unsigned long addr,
 	info.length = len;
 	info.low_limit = max(PAGE_SIZE, mmap_min_addr);
 	info.high_limit = arch_get_mmap_base(addr, mm->mmap_base);
-	info.align_mask = 0;
 	info.align_offset = 0;
+#ifndef CONFIG_CONT_PTE_HUGEPAGE
+	info.align_mask = 0;
+#else
+	handle_chp_get_unmapped_area(&info, filp, pgoff);
+#endif
 	trace_android_vh_exclude_reserved_zone(mm, &info);
 	addr = vm_unmapped_area(&info);
 
@@ -2418,8 +2463,22 @@ struct vm_area_struct *get_vma(struct mm_struct *mm, unsigned long addr)
 
 	read_lock(&mm->mm_rb_lock);
 	vma = __find_vma(mm, addr);
-	if (vma)
-		atomic_inc(&vma->vm_ref_count);
+
+	/*
+	 * If there is a concurrent fast mremap, bail out since the entire
+	 * PMD/PUD subtree may have been remapped.
+	 *
+	 * This is usually safe for conventional mremap since it takes the
+	 * PTE locks as does SPF. However fast mremap only takes the lock
+	 * at the PMD/PUD level which is ok as it is done with the mmap
+	 * write lock held. But since SPF, as the term implies forgoes,
+	 * taking the mmap read lock and also cannot take PTL lock at the
+	 * larger PMD/PUD granualrity, since it would introduce huge
+	 * contention in the page fault path; fall back to regular fault
+	 * handling.
+	 */
+	if (vma && !atomic_inc_unless_negative(&vma->vm_ref_count))
+		vma = NULL;
 	read_unlock(&mm->mm_rb_lock);
 
 	return vma;
@@ -2765,11 +2824,28 @@ static void unmap_region(struct mm_struct *mm,
 {
 	struct vm_area_struct *next = vma_next(mm, prev);
 	struct mmu_gather tlb;
+	struct vm_area_struct *cur_vma;
 
 	lru_add_drain();
 	tlb_gather_mmu(&tlb, mm, start, end);
 	update_hiwater_rss(mm);
 	unmap_vmas(&tlb, vma, start, end);
+
+	/*
+	 * Ensure we have no stale TLB entries by the time this mapping is
+	 * removed from the rmap.
+	 * Note that we don't have to worry about nested flushes here because
+	 * we're holding the mm semaphore for removing the mapping - so any
+	 * concurrent flush in this region has to be coming through the rmap,
+	 * and we synchronize against that using the rmap lock.
+	 */
+	for (cur_vma = vma; cur_vma; cur_vma = cur_vma->vm_next) {
+		if ((cur_vma->vm_flags & (VM_PFNMAP|VM_MIXEDMAP)) != 0) {
+			tlb_flush_mmu(&tlb);
+			break;
+		}
+	}
+
 	free_pgtables(&tlb, vma, prev ? prev->vm_end : FIRST_USER_ADDRESS,
 				 next ? next->vm_start : USER_PGTABLES_CEILING);
 	tlb_finish_mmu(&tlb, start, end);
@@ -2890,6 +2966,14 @@ int split_vma(struct mm_struct *mm, struct vm_area_struct *vma,
 {
 	if (mm->map_count >= sysctl_max_map_count)
 		return -ENOMEM;
+
+#ifdef CONFIG_CONT_PTE_HUGEPAGE
+#if CONFIG_CHP_ABMORMAL_PTES_DEBUG
+	if (vma_is_chp_anonymous(vma) && !IS_ALIGNED(addr, HPAGE_CONT_PTE_SIZE)) {
+		{volatile bool __maybe_unused x = commit_chp_abnormal_ptes_record(DOUBLE_MAP_REASON_SPLIT_VMA);}
+	}
+#endif
+#endif
 
 	return __split_vma(mm, vma, addr, new_below);
 }
@@ -3132,7 +3216,11 @@ SYSCALL_DEFINE5(remap_file_pages, unsigned long, start, unsigned long, size,
 			 * Split pmd and munlock page on the border
 			 * of the range.
 			 */
+#ifdef CONFIG_CONT_PTE_HUGEPAGE
+			vma_adjust_cont_pte_trans_huge(tmp, start, start + size, 0);
+#else
 			vma_adjust_trans_huge(tmp, start, start + size, 0);
+#endif
 
 			munlock_vma_pages_range(tmp,
 					max(tmp->vm_start, start),
@@ -3326,6 +3414,7 @@ void exit_mmap(struct mm_struct *mm)
 		vma = remove_vma(vma);
 		cond_resched();
 	}
+	mm->mmap = NULL;
 	mmap_write_unlock(mm);
 	vm_unacct_memory(nr_accounted);
 }

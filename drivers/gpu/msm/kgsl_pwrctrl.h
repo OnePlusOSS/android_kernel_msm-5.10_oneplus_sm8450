@@ -95,6 +95,7 @@ struct kgsl_pwrlevel {
  * @clk_stats - structure of clock statistics
  * @input_disable - To disable GPU wakeup on touch input event
  * @bus_control - true if the bus calculation is independent
+ * @bus_nolimit - true if the bus vote freq not limit in opp table
  * @bus_mod - modifier from the current power level for the bus vote
  * @bus_percent_ab - current percent of total possible bus usage
  * @bus_width - target specific bus width in number of bytes
@@ -137,6 +138,9 @@ struct kgsl_pwrctrl {
 	u64 clock_times[KGSL_MAX_PWRLEVELS];
 	struct kgsl_clk_stats clk_stats;
 	bool bus_control;
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_KGSL_BUS_NOLIMIT)
+	bool bus_nolimit;
+#endif /* CONFIG_OPLUS_FEATURE_KGSL_BUS_NOLIMIT */
 	int bus_mod;
 	unsigned int bus_percent_ab;
 	unsigned int bus_width;

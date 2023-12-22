@@ -7,6 +7,7 @@
 #ifndef __EROFS_FS_ZDATA_H
 #define __EROFS_FS_ZDATA_H
 
+#include <linux/kthread.h>
 #include "internal.h"
 #include "zpvec.h"
 
@@ -92,6 +93,7 @@ struct z_erofs_decompressqueue {
 	union {
 		struct completion done;
 		struct work_struct work;
+		struct kthread_work kthread_work;
 	} u;
 };
 
@@ -175,9 +177,17 @@ static inline void z_erofs_onlinepage_endio(struct page *page)
 	if (!(v & Z_EROFS_ONLINEPAGE_COUNT_MASK)) {
 		set_page_private(page, 0);
 		ClearPagePrivate(page);
-		if (!PageError(page))
-			SetPageUptodate(page);
-		unlock_page(page);
+
+#ifdef CONFIG_CONT_PTE_HUGEPAGE
+		if (PageCont(page)) {
+			set_cont_pte_uptodate_and_unlock(page);
+		} else
+#endif
+		{
+			if (!PageError(page))
+				SetPageUptodate(page);
+			unlock_page(page);
+		}
 	}
 	erofs_dbg("%s, page %p value %x", __func__, page, atomic_read(u.o));
 }

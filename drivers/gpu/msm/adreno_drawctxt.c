@@ -8,6 +8,9 @@
 
 #include "adreno.h"
 #include "adreno_trace.h"
+#ifdef OPLUS_FEATURE_DISPLAY
+#include <soc/oplus/system/oplus_mm_kevent_fb.h>
+#endif /* OPLUS_FEATURE_DISPLAY */
 
 static void wait_callback(struct kgsl_device *device,
 		struct kgsl_event_group *group, void *priv, int result)
@@ -80,6 +83,9 @@ void adreno_drawctxt_dump(struct kgsl_device *device,
 			dev_err(device->dev,
 				"  possible deadlock. Context %u might be blocked for itself\n",
 				context->id);
+#ifdef OPLUS_FEATURE_DISPLAY
+			mm_fb_display_kevent("DisplayDriverID@@423$$", MM_FB_KEY_RATELIMIT_1H, "gpu syncpoint deadlock:Context %u might be blocked\n", context->id);
+#endif /* OPLUS_FEATURE_DISPLAY */
 			goto stats;
 		}
 

@@ -19,6 +19,10 @@
 #include "walt.h"
 #include "trace.h"
 
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_PIPELINE)
+#include <../kernel/oplus_cpu/sched/sched_assist/sa_pipeline.h>
+#endif
+
 /* mask of CPUs on which there is an outstanding pause claim */
 static cpumask_t cpus_paused_by_us = { CPU_BITS_NONE };
 
@@ -87,6 +91,24 @@ static unsigned int get_active_cpu_count(const struct cluster_data *cluster);
 
 /* ========================= sysfs interface =========================== */
 
+noinline int tracing_mark_write(const char *buf)
+{
+	trace_printk(buf);
+	return 0;
+}
+
+static void store_cpus_systrace_c(struct cluster_data *state, unsigned int val, bool max)
+{
+	char buf[256];
+
+	if(max) {
+		snprintf(buf, sizeof(buf), "C|9999|Group%d_max_cpu|%d\n", state->first_cpu, val);
+	} else {
+		snprintf(buf, sizeof(buf), "C|9999|Group%d_min_cpu|%d\n", state->first_cpu, val);
+	}
+	tracing_mark_write(buf);
+}
+
 static ssize_t store_min_cpus(struct cluster_data *state,
 				const char *buf, size_t count)
 {
@@ -97,6 +119,9 @@ static ssize_t store_min_cpus(struct cluster_data *state,
 
 	state->min_cpus = min(val, state->num_cpus);
 	apply_need(state);
+
+	pr_debug("group %u min_cpus: %u from pid=%d comm=%s\n", state->first_cpu, state->min_cpus, current->pid, current->comm);
+	store_cpus_systrace_c(state, state->min_cpus, 0);
 
 	return count;
 }
@@ -116,6 +141,9 @@ static ssize_t store_max_cpus(struct cluster_data *state,
 
 	state->max_cpus = min(val, state->num_cpus);
 	apply_need(state);
+
+	pr_debug("group %u max_cpus: %u from pid=%d comm=%s\n", state->first_cpu, state->max_cpus, current->pid, current->comm);
+	store_cpus_systrace_c(state, state->max_cpus, 1);
 
 	return count;
 }
@@ -1348,6 +1376,10 @@ int core_ctl_init(void)
 		if (ret)
 			pr_warn("unable to create core ctl group: %d\n", ret);
 	}
+
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_PIPELINE)
+	oplus_core_ctl_set_boost = core_ctl_set_boost;
+#endif
 
 	initialized = true;
 

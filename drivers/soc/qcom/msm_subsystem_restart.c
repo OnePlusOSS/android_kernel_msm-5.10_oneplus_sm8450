@@ -42,6 +42,8 @@
 static uint disable_restart_work;
 module_param(disable_restart_work, uint, 0644);
 
+static DEFINE_MUTEX(subsys_list_lock);
+
 /* The maximum shutdown timeout is the product of MAX_LOOPS and DELAY_MS. */
 #define SHUTDOWN_ACK_MAX_LOOPS	100
 #define SHUTDOWN_ACK_DELAY_MS	100
@@ -326,6 +328,40 @@ static ssize_t system_debug_store(struct device *dev,
 	return orig_count;
 }
 static DEVICE_ATTR_RW(system_debug);
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_SENSOR_FEEDBACK)
+#define CRASH_CAUSE_BUF_LEN 128
+char crash_case_buf[CRASH_CAUSE_BUF_LEN] = {0};
+
+void set_subsys_crash_cause(char *str)
+{
+	pr_err("HELLO_WORLD set_subsys_crash_cause");
+	int len = 0;
+	len = strlen(str);
+	if(len >= CRASH_CAUSE_BUF_LEN)
+		len = CRASH_CAUSE_BUF_LEN -1;
+	memcpy(crash_case_buf, str, len);
+	crash_case_buf[len] = '\0';
+}
+EXPORT_SYMBOL(set_subsys_crash_cause);
+
+static ssize_t crash_cause_show(struct device *dev,
+				struct device_attribute *attr, char *buf)
+{
+	int ret = 0;
+	mutex_lock(&subsys_list_lock);
+	ret = snprintf(buf, PAGE_SIZE, "%s\n", crash_case_buf);
+	mutex_unlock(&subsys_list_lock);
+	return ret;
+}
+
+static ssize_t crash_cause_store(struct device *dev,
+				struct device_attribute *attr, const char *buf,
+				size_t count)
+{
+	return count;
+}
+static DEVICE_ATTR_RW(crash_cause);
+#endif
 
 static void subsys_set_state(struct subsys_device *subsys,
 			     enum subsys_state state)
@@ -349,6 +385,9 @@ static struct attribute *subsys_attrs[] = {
 	&dev_attr_restart_level.attr,
 	&dev_attr_firmware_name.attr,
 	&dev_attr_system_debug.attr,
+#if IS_ENABLED(CONFIG_OPLUS_FEATURE_SENSOR_FEEDBACK)
+	&dev_attr_crash_cause.attr,
+#endif
 	NULL,
 };
 
@@ -376,7 +415,7 @@ static LIST_HEAD(subsys_list);
 static LIST_HEAD(ssr_order_list);
 static DEFINE_MUTEX(soc_order_reg_lock);
 static DEFINE_MUTEX(restart_log_mutex);
-static DEFINE_MUTEX(subsys_list_lock);
+/*static DEFINE_MUTEX(subsys_list_lock);*/
 static DEFINE_MUTEX(char_device_lock);
 static DEFINE_MUTEX(ssr_order_mutex);
 

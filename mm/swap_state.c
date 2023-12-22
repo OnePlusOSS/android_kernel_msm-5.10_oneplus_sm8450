@@ -149,6 +149,13 @@ int add_to_swap_cache(struct page *page, swp_entry_t entry,
 		xas_create_range(&xas);
 		if (xas_error(&xas))
 			goto unlock;
+
+#ifdef CONFIG_CONT_PTE_HUGEPAGE
+		if (nr > 1) {
+			CHP_BUG_ON(!is_thp_swap(swp_swap_info(entry)));
+			CHP_BUG_ON(!IS_ALIGNED(swp_offset(entry), HPAGE_CONT_PTE_NR));
+		}
+#endif
 		for (i = 0; i < nr; i++) {
 			VM_BUG_ON_PAGE(xas.xa_index != idx + i, page);
 			old = xas_load(&xas);
@@ -161,7 +168,9 @@ int add_to_swap_cache(struct page *page, swp_entry_t entry,
 			xas_store(&xas, page);
 			xas_next(&xas);
 		}
+#ifndef CONFIG_CONT_PTE_HUGEPAGE
 		address_space->nrexceptional -= nr_shadows;
+#endif
 		address_space->nrpages += nr;
 		__mod_node_page_state(page_pgdat(page), NR_FILE_PAGES, nr);
 		ADD_CACHE_INFO(add_total, nr);
@@ -200,8 +209,10 @@ void __delete_from_swap_cache(struct page *page,
 		xas_next(&xas);
 	}
 	ClearPageSwapCache(page);
+#ifndef CONFIG_CONT_PTE_HUGEPAGE
 	if (shadow)
 		address_space->nrexceptional += nr;
+#endif
 	address_space->nrpages -= nr;
 	__mod_node_page_state(page_pgdat(page), NR_FILE_PAGES, -nr);
 	ADD_CACHE_INFO(del_total, nr);
@@ -302,7 +313,9 @@ void clear_shadow_from_swap_cache(int type, unsigned long begin,
 			xas_store(&xas, NULL);
 			nr_shadows++;
 		}
+#ifndef CONFIG_CONT_PTE_HUGEPAGE
 		address_space->nrexceptional -= nr_shadows;
+#endif
 		xa_unlock_irq(&address_space->i_pages);
 
 		/* search the next swapcache until we meet end */
@@ -746,10 +759,18 @@ static inline void swap_ra_clamp_pfn(struct vm_area_struct *vma,
 				     unsigned long *start,
 				     unsigned long *end)
 {
+#ifndef CONFIG_CONT_PTE_HUGEPAGE
 	*start = max3(lpfn, PFN_DOWN(READ_ONCE(vma->vm_start)),
 		      PFN_DOWN(faddr & PMD_MASK));
 	*end = min3(rpfn, PFN_DOWN(READ_ONCE(vma->vm_end)),
 		    PFN_DOWN((faddr & PMD_MASK) + PMD_SIZE));
+#else
+	/* make read-ahead aligned with CONT_PTE_SHIFT */
+	*start = max(PFN_DOWN(READ_ONCE(vma->vm_start)),
+		     PFN_DOWN(faddr & CONT_PTE_MASK));
+	*end = min(PFN_DOWN(READ_ONCE(vma->vm_end)),
+		   PFN_DOWN((faddr & CONT_PTE_MASK) + CONT_PTE_SIZE));
+#endif
 }
 
 static void swap_ra_info(struct vm_fault *vmf,

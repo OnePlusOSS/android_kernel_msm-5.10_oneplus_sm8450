@@ -85,7 +85,7 @@ struct page *qcom_dma_alloc_from_contiguous(struct device *dev, size_t count,
 		align = CONFIG_CMA_ALIGNMENT;
 
 	return cma_alloc(qcom_dev_get_cma_area(dev), count, align, GFP_KERNEL |
-			 (no_warn ? __GFP_NOWARN : 0));
+			(no_warn ? __GFP_NOWARN : 0));
 }
 
 bool qcom_dma_release_from_contiguous(struct device *dev, struct page *pages,
@@ -272,7 +272,6 @@ void qcom_dma_common_free_remap(void *cpu_addr, size_t size)
 		mutex_unlock(&rbtree_lock);
 		kfree(area);
 	}
-
 	vunmap(cpu_addr);
 }
 

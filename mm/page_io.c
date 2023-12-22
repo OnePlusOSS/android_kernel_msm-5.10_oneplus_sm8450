@@ -27,6 +27,7 @@
 #include <linux/sched/task.h>
 #include <trace/hooks/mm.h>
 
+
 static struct bio *get_swap_bio(gfp_t gfp_flags,
 				struct page *page, bio_end_io_t end_io)
 {
@@ -361,7 +362,11 @@ int swap_readpage(struct page *page, bool synchronous)
 		ret = mapping->a_ops->readpage(swap_file, page);
 		if (!ret) {
 			trace_android_vh_count_pswpin(sis);
+#ifdef CONFIG_CONT_PTE_HUGEPAGE
+			count_vm_events(PSWPIN, chp_swapin_nr_pages(page));
+#else
 			count_vm_event(PSWPIN);
+#endif
 		}
 		goto out;
 	}
@@ -370,10 +375,19 @@ int swap_readpage(struct page *page, bool synchronous)
 		ret = bdev_read_page(sis->bdev, swap_page_sector(page), page);
 		if (!ret) {
 			trace_android_vh_count_pswpin(sis);
+#ifdef CONFIG_CONT_PTE_HUGEPAGE
+			count_vm_events(PSWPIN, chp_swapin_nr_pages(page));
+#else
 			count_vm_event(PSWPIN);
+#endif
 			goto out;
 		}
 	}
+
+#ifdef CONT_PTE_HUGEPAGE_64K_ZRAM
+	//submit not support for readpage fallback now
+	CHP_BUG_ON(PageContFallback(page));
+#endif
 
 	ret = 0;
 	bio = get_swap_bio(GFP_KERNEL, page, end_swap_bio_read);
@@ -394,7 +408,11 @@ int swap_readpage(struct page *page, bool synchronous)
 		bio->bi_private = current;
 	}
 	trace_android_vh_count_pswpin(sis);
+#ifdef CONFIG_CONT_PTE_HUGEPAGE
+	count_vm_events(PSWPIN, thp_nr_pages(page));
+#else
 	count_vm_event(PSWPIN);
+#endif
 	bio_get(bio);
 	qc = submit_bio(bio);
 	while (synchronous) {

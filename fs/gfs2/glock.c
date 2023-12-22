@@ -273,8 +273,12 @@ static void __gfs2_glock_put(struct gfs2_glock *gl)
 	if (mapping) {
 		truncate_inode_pages_final(mapping);
 		if (!gfs2_withdrawn(sdp))
+#ifdef CONFIG_CONT_PTE_HUGEPAGE
+			GLOCK_BUG_ON(gl, !mapping_empty(mapping));
+#else
 			GLOCK_BUG_ON(gl, mapping->nrpages ||
 				     mapping->nrexceptional);
+#endif
 	}
 	trace_gfs2_glock_put(gl);
 	sdp->sd_lockstruct.ls_ops->lm_put_lock(gl);

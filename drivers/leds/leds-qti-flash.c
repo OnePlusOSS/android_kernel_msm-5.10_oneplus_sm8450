@@ -126,6 +126,10 @@
 
 #define LED_MASK_ALL(led)		GENMASK(led->max_channels - 1, 0)
 
+#ifdef OPLUS_FEATURE_CAMERA_COMMON
+int flsh_max_current_mA = 0;
+#endif
+
 enum flash_led_type {
 	FLASH_LED_TYPE_UNKNOWN,
 	FLASH_LED_TYPE_FLASH,
@@ -738,6 +742,15 @@ static int qti_flash_switch_enable(struct flash_switch_data *snode)
 		if (!(snode->led_mask & BIT(led->fnode[i].id)) ||
 			!led->fnode[i].configured)
 			continue;
+		/*
+		* For flash, LMH mitigation needs to be enabled
+		* if total current used is greater than or
+		* equal to 1A.
+		*/
+
+		type = led->fnode[i].type;
+		if (type == FLASH_LED_TYPE_FLASH)
+			total_curr_ma += led->fnode[i].user_current_ma;
 
 		/*
 		 * For flash, LMH mitigation needs to be enabled
@@ -756,7 +769,6 @@ static int qti_flash_switch_enable(struct flash_switch_data *snode)
 		rc = qti_flash_lmh_mitigation_config(led, true);
 		if (rc < 0)
 			return rc;
-
 		/* Wait for lmh mitigation to take effect */
 		udelay(500);
 	} else if (led->trigger_lmh) {
@@ -964,6 +976,18 @@ static int qti_flash_led_get_voltage_headroom(
 	return voltage_hdrm_max;
 }
 
+#ifdef OPLUS_FEATURE_CAMERA_COMMON
+int set_flash_max_current_mA(int max_current_mA)
+{
+	flsh_max_current_mA	= max_current_mA;
+	pr_err("flsh_max_current_mA=%d\n",
+			flsh_max_current_mA);
+
+	return 0;
+}
+EXPORT_SYMBOL(set_flash_max_current_mA);
+#endif
+
 static int qti_flash_led_calc_max_avail_current(
 			struct qti_flash_led *led,
 			int *max_current_ma)
@@ -974,6 +998,13 @@ static int qti_flash_led_calc_max_avail_current(
 		vph_flash_uv, vin_flash_uv, p_flash_fw;
 	union power_supply_propval prop = {};
 
+#ifdef OPLUS_FEATURE_CAMERA_COMMON
+	if (flsh_max_current_mA > 0) {
+		*max_current_ma = flsh_max_current_mA;
+		pr_err("max_current_ma=%d\n",*max_current_ma);
+		return 0;
+	}
+#endif
 	rc = qti_battery_charger_get_prop("battery", BATTERY_RESISTANCE,
 						&rbatt_uohm);
 	if (rc < 0) {
